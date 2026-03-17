@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>COMPOS SAKASSOU — Synchronisé v4.1</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Nunito',sans-serif;background:#f1f5f9;}
+    input,select,button,textarea{font-family:'Nunito',sans-serif;}
+    .fade{animation:fi 0.3s ease;}
+    @keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    .shake{animation:sh 0.4s ease;}
+    @keyframes sh{0%,100%{transform:none}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+    .spin{animation:sp 1s linear infinite;}
+    @keyframes sp{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    ::-webkit-scrollbar{width:5px;height:5px;}
+    ::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:3px;}
+    @media print{
+      .no-print{display:none!important;}
+      body{background:white;}
+      .print-card{box-shadow:none!important;border:1px solid #ccc!important;}
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
+
+// ═══════════════════════════════════════════════════
+// CONSTANTES
+// ═══════════════════════════════════════════════════
+const CLASSES=["CP1","CP2","CE1","CE2","CM1","CM2"];
+const COMPOSITIONS=["Composition 1","Composition 2","Composition 3","Composition 4"];
+const ANNEES=["2022-2023","2023-2024","2024-2025","2025-2026","2026-2027"];
+const MENTIONS=[
+  {label:"Excellent",   min:18, color:"#059669", bg:"#d1fae5"},
+  {label:"Très Bien",   min:16, color:"#2563eb", bg:"#dbeafe"},
+  {label:"Bien",        min:14, color:"#7c3aed", bg:"#ede9fe"},
+  {label:"Assez Bien",  min:12, color:"#0891b2", bg:"#cffafe"},
+  {label:"Passable",    min:10, color:"#d97706", bg:"#fef3c7"},
+  {label:"Insuffisant", min:0,  color:"#dc2626", bg:"#fee2e2"},
+];
+const getMention=m=>MENTIONS.find(x=>parseFloat(m)>=x.min)||MENTIONS[MENTIONS.length-1];
+
+// ═══════════════════════════════════════════════════
+// STOCKAGE LOCAL (identifiants Examens — sécurisé)
+// ═══════════════════════════════════════════════════
+const LOCAL={
+  get:(k,def)=>{try{const r=localStorage.getItem("csk_"+k);return r!=null?JSON.parse(r):def;}catch{return def;}},
+  set:(k,v)=>{try{localStorage.setItem("csk_"+k,JSON.stringify(v));}catch{}},
+  has:(k)=>localStorage.getItem("csk_"+k)!=null,
+};
+
+// ═══════════════════════════════════════════════════
+// STOCKAGE PARTAGÉ (window.storage) — synchronisé
+// ═══════════════════════════════════════════════════
+const SHARED={
+  async get(inspKey,k,def){
+    try{
+      const res=await window.storage.get(`${inspKey}:${k}`,true);
+      if(!res||res.value==null) return def;
+      return JSON.parse(res.value);
+    }catch{return def;}
+  },
+  async set(inspKey,k,v){
+    try{await window.storage.set(`${inspKey}:${k}`,JSON.stringify(v),true);return true;}
+    catch{return false;}
+  },
+};
+
+// ═══════════════════════════════════════════════════
+// CALCULS
+// ═══════════════════════════════════════════════════
+const calcMoy=(notesElv,matieres)=>{
+  let pts=0,coef=0;
+  (matieres||[]).forEach(m=>{
+    const n=parseFloat(notesElv?.[m.nom]);
+    if(!isNaN(n)&&n>=0){pts+=n*parseFloat(m.coeff||1);coef+=parseFloat(m.coeff||1);}
+  });
+  return coef>0?pts/coef:null;
+};
+
+const calcSynthese=(eleves,notes,matieres)=>{
+  const res=eleves.map(e=>({...e,moyenne:calcMoy(notes?.[e.id],matieres)})).filter(r=>r.moyenne!==null);
+  if(!res.length) return null;
+  res.sort((a,b)=>b.moyenne-a.moyenne);
+  let rang=1;
+  res.forEach((r,i)=>{if(i>0&&res[i].moyenne<res[i-1].moyenne)rang=i+1;r.rang=rang;});
+  const total=res.length,admis=res.filter(r=>r.moyenne>=10).length;
+  return{resultats:res,total,admis,echec:total-admis,moyClasse:res.reduce((s,r)=>s+r.moyenne,0)/total,taux:admis/total*100};
+};
+
+const exportCSV=(rows,fn)=>{
+  const c="\uFEFF"+rows.map(r=>r.map(c=>`"${String(c||"").replace(/"/g,'""')}"`).join(";")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([c],{type:"text/csv;charset=utf-8;"}));
+  a.download=fn;a.click();
+};
+
+// ═══════════════════════════════════════════════════
+// COMPOSANTS UI
+// ═══════════════════════════════════════════════════
+const Btn=({children,onClick,color="#166534",outline=false,sm=false,disabled=false,full=false,icon=""})=>(
+  React.createElement("button",{
+    onClick,disabled,
+    style:{
+      display:"inline-flex",alignItems:"center",gap:5,justifyContent:"center",
+      background:disabled?"#e5e7eb":outline?"transparent":color,
+      color:disabled?"#9ca3af":outline?color:"white",
+      border:`2px solid ${disabled?"#e5e7eb":color}`,
+      borderRadius:9,padding:sm?"5px 12px":"9px 18px",
+      fontWeight:700,fontSize:sm?"0.76rem":"0.85rem",
+      cursor:disabled?"not-allowed":"pointer",
+      transition:"all 0.15s",width:full?"100%":"auto",fontFamily:"inherit"
+    },
+    onMouseEnter:e=>{if(!disabled)e.currentTarget.style.opacity="0.85"},
+    onMouseLeave:e=>{e.currentTarget.style.opacity="1"},
+  },icon&&React.createElement("span",null,icon),children)
+);
+
+const Inp=({label,value,onChange,type="text",placeholder="",req=false,disabled=false,hint=""})=>(
+  React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:3}},
+    label&&React.createElement("label",{style:{fontSize:"0.76rem",fontWeight:700,color:"#374151"}},
+      label,req&&React.createElement("span",{style:{color:"#dc2626"}}," *")),
+    React.createElement("input",{
+      type,value,placeholder,disabled,
+      onChange:e=>onChange(e.target.value),
+      style:{border:"1.5px solid #d1d5db",borderRadius:8,padding:"8px 12px",fontSize:"0.88rem",outline:"none",color:"#111827",background:disabled?"#f9fafb":"white",cursor:disabled?"not-allowed":"text"},
+      onFocus:e=>{if(!disabled)e.target.style.borderColor="#166534";},
+      onBlur:e=>e.target.style.borderColor="#d1d5db",
+    }),
+    hint&&React.createElement("span",{style:{fontSize:"0.69rem",color:"#9ca3af",fontStyle:"italic"}},hint)
+  )
+);
+
+const Sel=({label,value,onChange,options,req=false,disabled=false})=>(
+  React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:3}},
+    label&&React.createElement("label",{style:{fontSize:"0.76rem",fontWeight:700,color:"#374151"}},
+      label,req&&React.createElement("span",{style:{color:"#dc2626"}}," *")),
+    React.createElement("select",{
+      value,onChange:e=>onChange(e.target.value),disabled,
+      style:{border:"1.5px solid #d1d5db",borderRadius:8,padding:"8px 12px",fontSize:"0.88rem",outline:"none",background:disabled?"#f9fafb":"white",color:"#111827",cursor:disabled?"not-allowed":"pointer"},
+      onFocus:e=>{if(!disabled)e.target.style.borderColor="#166534";},
+      onBlur:e=>e.target.style.borderColor="#d1d5db",
+    },
+      React.createElement("option",{value:""},"— Choisir —"),
+      options.map(o=>React.createElement("option",{key:o.v||o,value:o.v||o},o.l||o))
+    )
+  )
+);
+
+const Card=({children,style={}})=>(
+  React.createElement("div",{
+    className:"fade print-card",
+    style:{background:"white",borderRadius:16,boxShadow:"0 2px 12px rgba(0,0,0,0.06)",border:"1px solid #e5e7eb",padding:20,...style}
+  },children)
+);
+
+const Badge=({children,color="#166534",bg})=>(
+  React.createElement("span",{
+    style:{background:bg||color+"20",color,border:`1px solid ${color}40`,padding:"2px 9px",borderRadius:20,fontSize:"0.71rem",fontWeight:800,whiteSpace:"nowrap"}
+  },children)
+);
+
+const StatBox=({val,label,color,icon})=>(
+  React.createElement("div",{style:{background:`${color}12`,border:`2px solid ${color}30`,borderRadius:12,padding:"12px 8px",textAlign:"center"}},
+    React.createElement("div",{style:{fontSize:"1.4rem",marginBottom:1}},icon),
+    React.createElement("div",{style:{fontSize:"1.3rem",fontWeight:900,color,lineHeight:1}},val),
+    React.createElement("div",{style:{fontSize:"0.67rem",color:"#6b7280",fontWeight:700,marginTop:3,textTransform:"uppercase",letterSpacing:"0.04em"}},label)
+  )
+);
+
+const Loader=({msg="Chargement..."})=>(
+  React.createElement("div",{style:{textAlign:"center",padding:40,color:"#6b7280"}},
+    React.createElement("div",{className:"spin",style:{fontSize:"2rem",display:"inline-block",marginBottom:10}},"⏳"),
+    React.createElement("div",{style:{fontWeight:700,fontSize:"0.88rem"}},msg)
+  )
+);
+
+const SyncBadge=({inspKey})=>(
+  React.createElement("div",{style:{
+    background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",
+    borderRadius:8,padding:"4px 10px",fontSize:"0.69rem",color:"white",fontWeight:700,display:"inline-flex",alignItems:"center",gap:5
+  }},
+    "🔄 Sync · ",inspKey
+  )
+);
+
+// ═══════════════════════════════════════════════════
+// PAGE LOGIN
+// ═══════════════════════════════════════════════════
+const PageLogin=({onLogin})=>{
+  const [mode,setMode]=useState("accueil");
+  const [code,setCode]=useState("");
+  const [tel,setTel]=useState("");
+  const [login,setLogin]=useState("");
+  const [pass,setPass]=useState("");
+  const [err,setErr]=useState("");
+  const [shake,setShake]=useState(false);
+  const [loading,setLoading]=useState(false);
+  const doShake=()=>{setShake(true);setTimeout(()=>setShake(false),500);};
+  const inspKey=LOCAL.get("inspKey","sakassou");
+
+  const connexionEcole=async()=>{
+    setLoading(true);setErr("");
+    try{
+      const ecoles=await SHARED.get(inspKey,"ecoles",{});
+      const ecole=Object.values(ecoles).find(e=>e.code===code.trim()&&e.tel===tel.trim());
+      if(!ecole){setErr("Code école ou numéro incorrect.");doShake();}
+      else onLogin({type:"ecole",ecole,inspKey});
+    }catch{setErr("Erreur de connexion. Réessayez.");}
+    setLoading(false);
+  };
+
+  const connexionExamens=async()=>{
+    setLoading(true);setErr("");
+    try{
+      const creds=LOCAL.get("examens_creds",{login:"sami2026",password:"compos"});
+      if(login===creds.login&&pass===creds.password) onLogin({type:"examens",inspKey});
+      else{setErr("Identifiant ou mot de passe incorrect.");doShake();}
+    }catch{setErr("Erreur.");}
+    setLoading(false);
+  };
+
+  return React.createElement("div",{
+    style:{minHeight:"100vh",background:"linear-gradient(135deg,#14532d 0%,#166534 50%,#ca8a04 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}
+  },
+    React.createElement("div",{style:{textAlign:"center",marginBottom:30}},
+      React.createElement("div",{style:{width:80,height:80,borderRadius:22,background:"linear-gradient(135deg,#fbbf24,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"2.4rem",margin:"0 auto 14px",boxShadow:"0 8px 30px rgba(0,0,0,0.25)"}},"📝"),
+      React.createElement("h1",{style:{color:"white",fontSize:"1.75rem",fontWeight:900,letterSpacing:"-0.5px"}},"COMPOS SAKASSOU"),
+      React.createElement("p",{style:{color:"rgba(255,255,255,0.8)",fontSize:"0.8rem",fontWeight:600,marginTop:5}},"Gestion des Résultats · CP1→CM2"),
+      React.createElement("div",{style:{marginTop:8,background:"rgba(255,255,255,0.15)",borderRadius:10,padding:"5px 14px",display:"inline-block",fontSize:"0.72rem",color:"rgba(255,255,255,0.9)",fontWeight:700}},
+        "🔄 Synchronisé · Inspection: "+inspKey
+      )
+    ),
+
+    mode==="accueil"&&React.createElement("div",{className:"fade",style:{width:"100%",maxWidth:400,display:"flex",flexDirection:"column",gap:14}},
+      React.createElement("div",{style:{background:"white",borderRadius:18,padding:26}},
+        React.createElement("div",{style:{fontSize:"1rem",fontWeight:800,color:"#166534",marginBottom:18,textAlign:"center"}},"Choisissez votre profil"),
+        React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+          React.createElement("button",{
+            onClick:()=>{setMode("ecole");setErr("");},
+            style:{background:"linear-gradient(135deg,#1d4ed8,#2563eb)",color:"white",border:"none",borderRadius:12,padding:"15px 18px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:14,fontFamily:"inherit",boxShadow:"0 4px 14px rgba(37,99,235,0.35)",transition:"all 0.2s"},
+            onMouseEnter:e=>e.currentTarget.style.transform="translateY(-2px)",
+            onMouseLeave:e=>e.currentTarget.style.transform="none",
+          },
+            React.createElement("span",{style:{fontSize:"2rem"}},"🏫"),
+            React.createElement("div",null,
+              React.createElement("div",{style:{fontWeight:800,fontSize:"0.95rem"}},"Espace École"),
+              React.createElement("div",{style:{fontSize:"0.74rem",opacity:0.85}},"Code école + Tél. directeur")
+            )
+          ),
+          React.createElement("button",{
+            onClick:()=>{setMode("examens");setErr("");},
+            style:{background:"linear-gradient(135deg,#166534,#15803d)",color:"white",border:"none",borderRadius:12,padding:"15px 18px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:14,fontFamily:"inherit",boxShadow:"0 4px 14px rgba(22,101,52,0.35)",transition:"all 0.2s"},
+            onMouseEnter:e=>e.currentTarget.style.transform="translateY(-2px)",
+            onMouseLeave:e=>e.currentTarget.style.transform="none",
+          },
+            React.createElement("span",{style:{fontSize:"2rem"}},"🏛️"),
+            React.createElement("div",null,
+              React.createElement("div",{style:{fontWeight:800,fontSize:"0.95rem"}},"Service Examens & Concours"),
+              React.createElement("div",{style:{fontSize:"0.74rem",opacity:0.85}},"Accès IEPP — Administration")
+            )
+          )
+        )
+      ),
+      React.createElement("p",{style:{textAlign:"center",color:"rgba(255,255,255,0.6)",fontSize:"0.72rem"}},"🔄 Données synchronisées entre toutes les écoles")
+    ),
+
+    mode==="ecole"&&React.createElement("div",{className:`fade${shake?" shake":""}`,style:{width:"100%",maxWidth:380}},
+      React.createElement("div",{style:{background:"white",borderRadius:18,padding:26}},
+        React.createElement("button",{onClick:()=>{setMode("accueil");setErr("");},style:{background:"none",border:"none",cursor:"pointer",color:"#6b7280",fontSize:"0.82rem",fontWeight:700,marginBottom:16,display:"flex",alignItems:"center",gap:4}},"← Retour"),
+        React.createElement("div",{style:{textAlign:"center",marginBottom:18}},
+          React.createElement("div",{style:{fontSize:"2rem"}},"🏫"),
+          React.createElement("div",{style:{fontWeight:900,color:"#1d4ed8",fontSize:"1rem",marginTop:4}},"Connexion École")
+        ),
+        React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+          React.createElement(Inp,{label:"Code École",value:code,onChange:setCode,placeholder:"Ex: CI0100001",req:true}),
+          React.createElement(Inp,{label:"N° Téléphone du Directeur",value:tel,onChange:setTel,placeholder:"Ex: 0701020304",req:true}),
+          err&&React.createElement("div",{style:{background:"#fee2e2",color:"#dc2626",padding:"8px 12px",borderRadius:8,fontSize:"0.82rem",fontWeight:700}},err),
+          loading?React.createElement(Loader,{msg:"Connexion..."}):React.createElement(Btn,{onClick:connexionEcole,color:"#1d4ed8",full:true},"Se connecter")
+        )
+      )
+    ),
+
+    mode==="examens"&&React.createElement("div",{className:`fade${shake?" shake":""}`,style:{width:"100%",maxWidth:380}},
+      React.createElement("div",{style:{background:"white",borderRadius:18,padding:26}},
+        React.createElement("button",{onClick:()=>{setMode("accueil");setErr("");},style:{background:"none",border:"none",cursor:"pointer",color:"#6b7280",fontSize:"0.82rem",fontWeight:700,marginBottom:16,display:"flex",alignItems:"center",gap:4}},"← Retour"),
+        React.createElement("div",{style:{textAlign:"center",marginBottom:18}},
+          React.createElement("div",{style:{fontSize:"2rem"}},"🏛️"),
+          React.createElement("div",{style:{fontWeight:900,color:"#166534",fontSize:"1rem",marginTop:4}},"Service Examens & Concours")
+        ),
+        React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+          React.createElement(Inp,{label:"Identifiant",value:login,onChange:setLogin,req:true}),
+          React.createElement(Inp,{label:"Mot de passe",type:"password",value:pass,onChange:setPass,req:true}),
+          err&&React.createElement("div",{style:{background:"#fee2e2",color:"#dc2626",padding:"8px 12px",borderRadius:8,fontSize:"0.82rem",fontWeight:700}},err),
+          loading?React.createElement(Loader,{msg:"Connexion..."}):React.createElement(Btn,{onClick:connexionExamens,color:"#166534",full:true},"Se connecter")
+        )
+      )
+    )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE CONFIG (Examens seulement)
+// ═══════════════════════════════════════════════════
+const PageConfig=({session,toast})=>{
+  const {inspKey}=session;
+  const [cfg,setCfg]=useState({inspection:"",prefecture:"",sousPrefect:"",commune:"",secteur:"",annee:"2024-2025"});
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+
+  useEffect(()=>{
+    SHARED.get(inspKey,"config",{inspection:"",prefecture:"",sousPrefect:"",commune:"",secteur:"",annee:"2024-2025"})
+      .then(c=>{setCfg(c);setLoading(false);});
+  },[]);
+
+  const sauver=async()=>{
+    setSaving(true);
+    const ok=await SHARED.set(inspKey,"config",cfg);
+    setSaving(false);
+    if(ok) toast("Configuration enregistrée et synchronisée !");
+    else toast("Erreur de synchronisation","err");
+  };
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement..."});
+
+  const fields=[
+    {k:"inspection",l:"🏛️ Inspection (IEPP)",ph:"Ex: IEPP de Sakassou"},
+    {k:"prefecture",l:"🏙️ Préfecture",ph:"Ex: Préfecture de Sakassou"},
+    {k:"sousPrefect",l:"📍 Sous-Préfecture",ph:"Ex: Sous-Préfecture de Sakassou"},
+    {k:"commune",l:"🏘️ Commune",ph:"Ex: Commune de Sakassou"},
+    {k:"secteur",l:"🎓 Secteur Pédagogique",ph:"Ex: Secteur Pédagogique N°1"},
+  ];
+
+  return React.createElement("div",{style:{maxWidth:580,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#166534,#15803d)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"⚙️ Configuration Générale"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Hiérarchie administrative · Visible par toutes les écoles"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    React.createElement(Card,null,
+      React.createElement("div",{style:{display:"grid",gap:12}},
+        ...fields.map(f=>React.createElement(Inp,{key:f.k,label:f.l,value:cfg[f.k]||"",onChange:v=>setCfg({...cfg,[f.k]:v}),placeholder:f.ph})),
+        React.createElement(Sel,{label:"📅 Année scolaire par défaut",value:cfg.annee||"",onChange:v=>setCfg({...cfg,annee:v}),options:ANNEES}),
+        React.createElement(Btn,{onClick:sauver,icon:"💾",disabled:saving},saving?"Synchronisation...":"Enregistrer la configuration")
+      )
+    )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE ÉCOLES (Examens seulement)
+// ═══════════════════════════════════════════════════
+const PageEcoles=({session,toast})=>{
+  const {inspKey}=session;
+  const [ecoles,setEcoles]=useState({});
+  const [form,setForm]=useState({nom:"",directeur:"",code:"",tel:"",secteur:"",sousPrefect:"",commune:""});
+  const [editId,setEditId]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+
+  const refresh=async()=>{const e=await SHARED.get(inspKey,"ecoles",{});setEcoles(e);};
+  useEffect(()=>{refresh().then(()=>setLoading(false));}, []);
+
+  const sauver=async()=>{
+    if(!form.nom||!form.code||!form.tel) return toast("Nom, code et téléphone obligatoires","err");
+    setSaving(true);
+    const id=editId||`ecole_${Date.now()}`;
+    const ec=await SHARED.get(inspKey,"ecoles",{});
+    const doublon=Object.values(ec).find(e=>e.code===form.code.trim()&&e.id!==id);
+    if(doublon){setSaving(false);return toast("Ce code école existe déjà","err");}
+    ec[id]={...form,id,nom:form.nom.trim(),code:form.code.trim(),tel:form.tel.trim(),
+      directeur:form.directeur.trim(),secteur:form.secteur?.trim()||"",
+      sousPrefect:form.sousPrefect?.trim()||"",commune:form.commune?.trim()||""};
+    const ok=await SHARED.set(inspKey,"ecoles",ec);
+    setSaving(false);
+    if(!ok) return toast("Erreur de synchronisation","err");
+    await refresh();
+    setForm({nom:"",directeur:"",code:"",tel:"",secteur:"",sousPrefect:"",commune:""});
+    setEditId(null);
+    toast(editId?"École modifiée !":"École ajoutée !");
+  };
+
+  const supprimer=async id=>{
+    if(!confirm("Supprimer cette école ?")) return;
+    const ec=await SHARED.get(inspKey,"ecoles",{});
+    delete ec[id];
+    await SHARED.set(inspKey,"ecoles",ec);
+    await refresh();toast("Supprimée !");
+  };
+
+  const editer=e=>{
+    setForm({nom:e.nom,directeur:e.directeur||"",code:e.code||"",tel:e.tel||"",
+      secteur:e.secteur||"",sousPrefect:e.sousPrefect||"",commune:e.commune||""});
+    setEditId(e.id);
+  };
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement des écoles..."});
+
+  return React.createElement("div",{style:{maxWidth:760,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#1d4ed8,#2563eb)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"🏫 Gestion des Écoles"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},Object.keys(ecoles).length+" école(s) · Les écoles peuvent aussi compléter leurs informations"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    React.createElement(Card,null,
+      React.createElement("div",{style:{fontWeight:800,color:"#1d4ed8",marginBottom:14}},editId?"✏️ Modifier l'école":"➕ Nouvelle école"),
+      // Identité
+      React.createElement("div",{style:{fontSize:"0.75rem",fontWeight:800,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}},"Identification & Connexion"),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}},
+        React.createElement(Inp,{label:"Nom de l'école *",value:form.nom,onChange:v=>setForm({...form,nom:v}),placeholder:"Ex: EPP Sakassou Centre"}),
+        React.createElement(Inp,{label:"Directeur / Directrice",value:form.directeur,onChange:v=>setForm({...form,directeur:v}),placeholder:"Nom complet"}),
+        React.createElement(Inp,{label:"Code École * (identifiant connexion)",value:form.code,onChange:v=>setForm({...form,code:v}),placeholder:"Ex: CI0100001"}),
+        React.createElement(Inp,{label:"Tél. Directeur * (mot de passe connexion)",value:form.tel,onChange:v=>setForm({...form,tel:v}),placeholder:"Ex: 0701020304"})
+      ),
+      // Localisation
+      React.createElement("div",{style:{fontSize:"0.75rem",fontWeight:800,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}},"Localisation administrative"),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}},
+        React.createElement(Inp,{label:"Secteur Pédagogique",value:form.secteur,onChange:v=>setForm({...form,secteur:v}),placeholder:"Ex: Secteur N°1"}),
+        React.createElement(Inp,{label:"Sous-Préfecture",value:form.sousPrefect,onChange:v=>setForm({...form,sousPrefect:v}),placeholder:"Ex: Sakassou"}),
+        React.createElement(Inp,{label:"Commune",value:form.commune,onChange:v=>setForm({...form,commune:v}),placeholder:"Ex: Commune Sakassou"})
+      ),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:sauver,color:"#1d4ed8",icon:editId?"✅":"➕",disabled:saving},saving?"Sauvegarde...":(editId?"Modifier":"Ajouter")),
+        editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setForm({nom:"",directeur:"",code:"",tel:"",secteur:"",sousPrefect:"",commune:""});}},"Annuler")
+      )
+    ),
+    ...Object.values(ecoles).map(e=>
+      React.createElement(Card,{key:e.id,style:{padding:14}},
+        React.createElement("div",{style:{display:"flex",alignItems:"flex-start",gap:12,flexWrap:"wrap"}},
+          React.createElement("div",{style:{flex:1}},
+            React.createElement("div",{style:{fontWeight:800,fontSize:"0.95rem"}},e.nom),
+            React.createElement("div",{style:{color:"#6b7280",fontSize:"0.79rem",marginTop:3}},
+              "👤 "+(e.directeur||"—")+" · 🔑 "+e.code+" · 📱 "+e.tel
+            ),
+            React.createElement("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}},
+              e.secteur&&React.createElement(Badge,{color:"#7c3aed"},"🎓 "+e.secteur),
+              e.sousPrefect&&React.createElement(Badge,{color:"#0891b2"},"📍 "+e.sousPrefect),
+              e.commune&&React.createElement(Badge,{color:"#166534"},"🏘️ "+e.commune)
+            )
+          ),
+          React.createElement("div",{style:{display:"flex",gap:6,flexShrink:0}},
+            React.createElement(Btn,{sm:true,outline:true,color:"#1d4ed8",onClick:()=>editer(e),icon:"✏️"},"Modifier"),
+            React.createElement(Btn,{sm:true,outline:true,color:"#dc2626",onClick:()=>supprimer(e.id),icon:"🗑️"},"Suppr.")
+          )
+        )
+      )
+    ),
+    !Object.keys(ecoles).length&&React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af",fontStyle:"italic"}},"Aucune école. Commencez par en ajouter une.")
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE MON ÉCOLE (Espace École — infos propres)
+// ═══════════════════════════════════════════════════
+const PageMonEcole=({session,toast})=>{
+  const {inspKey,ecole}=session;
+  const [form,setForm]=useState({secteur:"",sousPrefect:"",commune:""});
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+
+  useEffect(()=>{
+    SHARED.get(inspKey,"ecoles",{}).then(ec=>{
+      const e=ec[ecole.id]||ecole;
+      setForm({secteur:e.secteur||"",sousPrefect:e.sousPrefect||"",commune:e.commune||""});
+      setLoading(false);
+    });
+  },[]);
+
+  const sauver=async()=>{
+    setSaving(true);
+    const ec=await SHARED.get(inspKey,"ecoles",{});
+    ec[ecole.id]={...ec[ecole.id],
+      secteur:form.secteur.trim(),
+      sousPrefect:form.sousPrefect.trim(),
+      commune:form.commune.trim()
+    };
+    const ok=await SHARED.set(inspKey,"ecoles",ec);
+    setSaving(false);
+    if(ok) toast("Informations mises à jour et synchronisées !");
+    else toast("Erreur de synchronisation","err");
+  };
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement..."});
+
+  return React.createElement("div",{style:{maxWidth:560,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#1d4ed8,#2563eb)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"🏫 Mon École — Informations"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Complétez les informations de votre école · Synchronisé avec l'inspection"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    // Infos fixes (lecture seule)
+    React.createElement(Card,{style:{background:"#f0fdf4",border:"2px solid #bbf7d0"}},
+      React.createElement("div",{style:{fontWeight:800,color:"#166534",marginBottom:10}},"📋 Informations enregistrées"),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+        React.createElement(Inp,{label:"Nom de l'école",value:ecole.nom,onChange:()=>{},disabled:true}),
+        React.createElement(Inp,{label:"Directeur / Directrice",value:ecole.directeur||"—",onChange:()=>{},disabled:true}),
+        React.createElement(Inp,{label:"Code école",value:ecole.code,onChange:()=>{},disabled:true}),
+        React.createElement(Inp,{label:"Téléphone",value:ecole.tel,onChange:()=>{},disabled:true})
+      )
+    ),
+    // Infos modifiables par l'école
+    React.createElement(Card,null,
+      React.createElement("div",{style:{fontWeight:800,color:"#1d4ed8",marginBottom:4}},"✏️ Localisation administrative"),
+      React.createElement("div",{style:{color:"#6b7280",fontSize:"0.8rem",marginBottom:14}},"Ces informations complètent votre fiche et sont visibles dans les synthèses."),
+      React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+        React.createElement(Inp,{
+          label:"Secteur Pédagogique",
+          value:form.secteur,
+          onChange:v=>setForm({...form,secteur:v}),
+          placeholder:"Ex: Secteur Pédagogique N°1",
+          hint:"Renseigné par votre inspecteur ou directeur"
+        }),
+        React.createElement(Inp,{
+          label:"Sous-Préfecture",
+          value:form.sousPrefect,
+          onChange:v=>setForm({...form,sousPrefect:v}),
+          placeholder:"Ex: Sous-Préfecture de Sakassou"
+        }),
+        React.createElement(Inp,{
+          label:"Commune",
+          value:form.commune,
+          onChange:v=>setForm({...form,commune:v}),
+          placeholder:"Ex: Commune de Sakassou"
+        }),
+        React.createElement(Btn,{onClick:sauver,color:"#1d4ed8",icon:"💾",disabled:saving},saving?"Synchronisation...":"Enregistrer mes informations")
+      )
+    )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE CANEVAS  — Examens crée, École consulte
+// ═══════════════════════════════════════════════════
+const PageCanevas=({session,toast})=>{
+  const {inspKey}=session;
+  const isEx=session.type==="examens";
+  const [ecoles,setEcoles]=useState({});
+  const [canevas,setCanevas]=useState({});
+  const [form,setForm]=useState({ecoleId:"",classe:"",compNum:"",annee:"2024-2025"});
+  const [mats,setMats]=useState([{nom:"",coeff:"2",noteMax:"20"}]);
+  const [editId,setEditId]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+
+  const refresh=async()=>{
+    const [e,c]=await Promise.all([SHARED.get(inspKey,"ecoles",{}),SHARED.get(inspKey,"canevas",{})]);
+    setEcoles(e);setCanevas(c);
+  };
+  useEffect(()=>{refresh().then(()=>setLoading(false));}, []);
+
+  const SUGG={
+    CP1:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d'Éveil",coeff:"1",noteMax:"20"}],
+    CP2:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d'Éveil",coeff:"1",noteMax:"20"}],
+    CE1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
+    CE2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
+    CM1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
+    CM2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
+  };
+
+  const ecoleName=id=>ecoles[id]?.nom||"?";
+
+  const sauver=async()=>{
+    if(!form.ecoleId||!form.classe||!form.compNum) return toast("Remplissez tous les champs obligatoires","err");
+    const validMats=mats.filter(m=>m.nom.trim());
+    if(!validMats.length) return toast("Ajoutez au moins une matière","err");
+    setSaving(true);
+    const id=editId||`cnv_${Date.now()}`;
+    const c2=await SHARED.get(inspKey,"canevas",{});
+    c2[id]={id,ecoleId:form.ecoleId,classe:form.classe,compNum:form.compNum,annee:form.annee||"2024-2025",matieres:validMats};
+    const ok=await SHARED.set(inspKey,"canevas",c2);
+    setSaving(false);
+    if(!ok) return toast("Erreur de synchronisation","err");
+    await refresh();
+    setForm({ecoleId:"",classe:"",compNum:"",annee:"2024-2025"});
+    setMats([{nom:"",coeff:"2",noteMax:"20"}]);setEditId(null);
+    toast(editId?"Canevas modifié !":"Canevas créé et synchronisé !");
+  };
+
+  const supprimer=async id=>{
+    if(!confirm("Supprimer ce canevas ?")) return;
+    const c2=await SHARED.get(inspKey,"canevas",{});delete c2[id];
+    await SHARED.set(inspKey,"canevas",c2);
+    await refresh();toast("Supprimé !");
+  };
+
+  const editer=c=>{
+    setForm({ecoleId:c.ecoleId,classe:c.classe,compNum:c.compNum,annee:c.annee});
+    setMats(c.matieres);setEditId(c.id);window.scrollTo(0,0);
+  };
+
+  const updMat=(i,k,v)=>{const nm=[...mats];nm[i]={...nm[i],[k]:v};setMats(nm);};
+
+  // Écoles : ne voir que leurs canevas
+  const myCanevas=Object.values(canevas).filter(c=>isEx||c.ecoleId===session.ecole?.id);
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement des canevas..."});
+
+  return React.createElement("div",{style:{maxWidth:780,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#7c3aed,#8b5cf6)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"📋 Canevas de Compositions"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},
+        isEx?"Définis par Examens & Concours · Envoyés à toutes les écoles concernées":"Canevas définis par le Service Examens & Concours"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+
+    // Formulaire UNIQUEMENT pour Examens
+    isEx&&React.createElement(Card,null,
+      React.createElement("div",{style:{fontWeight:800,color:"#7c3aed",marginBottom:12}},editId?"✏️ Modifier le canevas":"➕ Créer un canevas"),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}},
+        React.createElement(Sel,{label:"École *",value:form.ecoleId,onChange:v=>setForm({...form,ecoleId:v}),options:Object.values(ecoles).map(e=>({v:e.id,l:e.nom})),req:true}),
+        React.createElement(Sel,{label:"Classe *",value:form.classe,onChange:v=>{setForm({...form,classe:v});if(SUGG[v])setMats(SUGG[v]);},options:CLASSES,req:true}),
+        React.createElement(Sel,{label:"Composition *",value:form.compNum,onChange:v=>setForm({...form,compNum:v}),options:COMPOSITIONS,req:true}),
+        React.createElement(Sel,{label:"Année scolaire",value:form.annee,onChange:v=>setForm({...form,annee:v}),options:ANNEES})
+      ),
+      React.createElement("div",{style:{background:"#f5f3ff",borderRadius:10,padding:12,marginBottom:12}},
+        React.createElement("div",{style:{fontWeight:800,color:"#7c3aed",fontSize:"0.82rem",marginBottom:8}},"📚 MATIÈRES & COEFFICIENTS"),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 28px",gap:6,marginBottom:6}},
+          ...["Matière","Coeff","/ Max",""].map(h=>React.createElement("div",{key:h,style:{fontSize:"0.7rem",fontWeight:800,color:"#7c3aed",textTransform:"uppercase"}},h))
+        ),
+        ...mats.map((m,i)=>React.createElement("div",{key:i,style:{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 28px",gap:6,marginBottom:6}},
+          React.createElement("input",{value:m.nom,onChange:e=>updMat(i,"nom",e.target.value),placeholder:"Nom de la matière",
+            style:{border:"1.5px solid #d1d5db",borderRadius:7,padding:"5px 9px",fontSize:"0.85rem",fontFamily:"inherit",outline:"none"},
+            onFocus:e=>e.target.style.borderColor="#7c3aed",onBlur:e=>e.target.style.borderColor="#d1d5db"}),
+          React.createElement("input",{type:"number",value:m.coeff,onChange:e=>updMat(i,"coeff",e.target.value),
+            style:{border:"1.5px solid #d1d5db",borderRadius:7,padding:"5px 6px",fontSize:"0.85rem",fontFamily:"inherit",outline:"none",textAlign:"center"},
+            onFocus:e=>e.target.style.borderColor="#7c3aed",onBlur:e=>e.target.style.borderColor="#d1d5db"}),
+          React.createElement("input",{type:"number",value:m.noteMax,onChange:e=>updMat(i,"noteMax",e.target.value),
+            style:{border:"1.5px solid #d1d5db",borderRadius:7,padding:"5px 6px",fontSize:"0.85rem",fontFamily:"inherit",outline:"none",textAlign:"center"},
+            onFocus:e=>e.target.style.borderColor="#7c3aed",onBlur:e=>e.target.style.borderColor="#d1d5db"}),
+          React.createElement("button",{onClick:()=>setMats(mats.filter((_,idx)=>idx!==i)),
+            style:{background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:6,cursor:"pointer",fontWeight:900}},"✕")
+        )),
+        React.createElement(Btn,{sm:true,outline:true,color:"#7c3aed",onClick:()=>setMats([...mats,{nom:"",coeff:"1",noteMax:"20"}]),icon:"➕"},"Ajouter matière")
+      ),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:sauver,color:"#7c3aed",icon:"💾",disabled:saving},saving?"Synchronisation...":(editId?"Enregistrer les modifications":"Créer le canevas")),
+        editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setMats([{nom:"",coeff:"2",noteMax:"20"}]);}},"Annuler")
+      )
+    ),
+
+    // Message lecture seule pour les écoles
+    !isEx&&React.createElement("div",{style:{background:"#eff6ff",border:"2px solid #bfdbfe",borderRadius:12,padding:"12px 16px",fontSize:"0.83rem",color:"#1e40af",fontWeight:600,display:"flex",alignItems:"center",gap:10}},
+      React.createElement("span",{style:{fontSize:"1.4rem"}},"ℹ️"),
+      React.createElement("span",null,"Les canevas sont définis par le Service Examens & Concours. Sélectionnez le canevas correspondant à votre classe pour saisir les notes.")
+    ),
+
+    // Liste des canevas
+    myCanevas.length===0&&React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af",fontStyle:"italic"}},
+      isEx?"Aucun canevas créé.":"Aucun canevas disponible pour votre école. Contactez le Service Examens & Concours."
+    ),
+    ...myCanevas.map(c=>React.createElement(Card,{key:c.id,style:{padding:14}},
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}},
+        React.createElement("div",{style:{flex:1}},
+          React.createElement("div",{style:{fontWeight:800}},ecoleName(c.ecoleId)),
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}},
+            React.createElement(Badge,{color:"#1d4ed8"},c.classe),
+            React.createElement(Badge,{color:"#7c3aed"},c.compNum),
+            React.createElement(Badge,{color:"#166534"},c.annee)
+          ),
+          React.createElement("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}},
+            ...c.matieres.map(m=>React.createElement("span",{key:m.nom,style:{background:"#f3f4f6",border:"1px solid #e5e7eb",borderRadius:6,padding:"1px 7px",fontSize:"0.73rem",fontWeight:700,color:"#374151"}},m.nom+" ×"+m.coeff+"/"+m.noteMax))
+          )
+        ),
+        isEx&&React.createElement("div",{style:{display:"flex",gap:6}},
+          React.createElement(Btn,{sm:true,outline:true,color:"#7c3aed",onClick:()=>editer(c),icon:"✏️"},"Modifier"),
+          React.createElement(Btn,{sm:true,outline:true,color:"#dc2626",onClick:()=>supprimer(c.id),icon:"🗑️"},"Suppr.")
+        )
+      )
+    ))
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE SAISIE
+// ═══════════════════════════════════════════════════
+const PageSaisie=({session,toast})=>{
+  const {inspKey}=session;
+  const isEx=session.type==="examens";
+  const [ecoles,setEcoles]=useState({});
+  const [allCnv,setAllCnv]=useState({});
+  const [cnvId,setCnvId]=useState("");
+  const [eleves,setEleves]=useState([]);
+  const [notes,setNotes]=useState({});
+  const [newElv,setNewElv]=useState({nom:"",prenom:"",sexe:"M",dateNais:""});
+  const [loading,setLoading]=useState(true);
+  const [cnvLoading,setCnvLoading]=useState(false);
+  const saveTimer=useRef(null);
+
+  useEffect(()=>{
+    Promise.all([SHARED.get(inspKey,"ecoles",{}),SHARED.get(inspKey,"canevas",{})])
+      .then(([e,c])=>{setEcoles(e);setAllCnv(c);setLoading(false);});
+  },[]);
+
+  useEffect(()=>{
+    if(!cnvId)return;
+    setCnvLoading(true);
+    Promise.all([SHARED.get(inspKey,"elv_"+cnvId,[]),SHARED.get(inspKey,"nts_"+cnvId,{})])
+      .then(([el,nt])=>{setEleves(el);setNotes(nt);setCnvLoading(false);});
+  },[cnvId]);
+
+  const myCnv=Object.values(allCnv).filter(c=>isEx||c.ecoleId===session.ecole?.id);
+  const cnv=allCnv[cnvId];
+  const ecoleName=id=>ecoles[id]?.nom||"?";
+
+  const ajouterElv=async()=>{
+    if(!newElv.nom.trim()) return toast("Le NOM est obligatoire","err");
+    const e={...newElv,id:"e_"+Date.now(),nom:newElv.nom.trim().toUpperCase(),prenom:newElv.prenom.trim()};
+    const nv=[...eleves,e];
+    setEleves(nv);
+    await SHARED.set(inspKey,"elv_"+cnvId,nv);
+    setNewElv({nom:"",prenom:"",sexe:"M",dateNais:""});
+    toast("Élève ajouté !");
+  };
+
+  const suppElv=async id=>{
+    const nv=eleves.filter(e=>e.id!==id);
+    setEleves(nv);await SHARED.set(inspKey,"elv_"+cnvId,nv);
+    const nn={...notes};delete nn[id];
+    setNotes(nn);await SHARED.set(inspKey,"nts_"+cnvId,nn);
+  };
+
+  const setNote=(eid,mat,val)=>{
+    const nn={...notes,[eid]:{...(notes[eid]||{}),[mat]:val}};
+    setNotes(nn);
+    if(saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{SHARED.set(inspKey,"nts_"+cnvId,nn);},800);
+  };
+
+  const getMoy=eid=>{if(!cnv)return null;const m=calcMoy(notes[eid],cnv.matieres);return m!==null?m.toFixed(2):null;};
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement..."});
+
+  return React.createElement("div",{style:{maxWidth:1000,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#b45309,#d97706)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"✏️ Saisie des Notes"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Notes synchronisées automatiquement · Visibles par Examens & Concours"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    React.createElement(Card,null,
+      React.createElement(Sel,{label:"📋 Sélectionner un canevas",value:cnvId,onChange:setCnvId,
+        options:myCnv.map(c=>({v:c.id,l:ecoleName(c.ecoleId)+" — "+c.classe+" — "+c.compNum+" ("+c.annee+")"}))})
+    ),
+    cnvId&&cnvLoading&&React.createElement(Loader,{msg:"Chargement des données..."}),
+    cnv&&!cnvLoading&&React.createElement(React.Fragment,null,
+      React.createElement(Card,{style:{background:"#fffbeb",border:"1px solid #fde68a",padding:12}},
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
+          React.createElement(Badge,{color:"#b45309"},ecoleName(cnv.ecoleId)),
+          React.createElement(Badge,{color:"#1d4ed8"},cnv.classe),
+          React.createElement(Badge,{color:"#7c3aed"},cnv.compNum),
+          React.createElement(Badge,{color:"#166534"},cnv.annee),
+          React.createElement("span",{style:{fontSize:"0.72rem",color:"#92400e",fontWeight:600}},"🔄 Sync auto")
+        )
+      ),
+      React.createElement(Card,null,
+        React.createElement("div",{style:{fontWeight:800,color:"#b45309",marginBottom:10}},"➕ Ajouter un élève"),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr",gap:8}},
+          React.createElement(Inp,{label:"NOM *",value:newElv.nom,onChange:v=>setNewElv({...newElv,nom:v}),placeholder:"NOM DE FAMILLE"}),
+          React.createElement(Inp,{label:"Prénoms",value:newElv.prenom,onChange:v=>setNewElv({...newElv,prenom:v}),placeholder:"Prénoms"}),
+          React.createElement(Sel,{label:"Sexe",value:newElv.sexe,onChange:v=>setNewElv({...newElv,sexe:v}),options:["M","F"]}),
+          React.createElement(Inp,{label:"Date nais.",type:"date",value:newElv.dateNais,onChange:v=>setNewElv({...newElv,dateNais:v})})
+        ),
+        React.createElement("div",{style:{marginTop:10}},React.createElement(Btn,{onClick:ajouterElv,color:"#b45309",icon:"➕"},"Ajouter l'élève"))
+      ),
+      eleves.length>0&&React.createElement(Card,{style:{padding:0,overflow:"auto"}},
+        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",color:"white",fontWeight:800,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+          React.createElement("span",null,"👥 "+eleves.length+" élève(s)"),
+          React.createElement("span",{style:{fontSize:"0.78rem",opacity:0.85}},"🔄 Sync automatique")
+        ),
+        React.createElement("div",{style:{overflowX:"auto"}},
+          React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
+            React.createElement("thead",null,
+              React.createElement("tr",{style:{background:"#f8fafc"}},
+                React.createElement("th",{style:{padding:"8px 10px",textAlign:"left",borderBottom:"2px solid #e5e7eb",minWidth:150,position:"sticky",left:0,background:"#f8fafc"}},"Élève"),
+                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center"}},"Sx"),
+                ...cnv.matieres.map(m=>React.createElement("th",{key:m.nom,style:{padding:"6px 8px",borderBottom:"2px solid #e5e7eb",textAlign:"center",minWidth:85,color:"#7c3aed",fontWeight:800}},
+                  m.nom,React.createElement("br"),React.createElement("span",{style:{color:"#9ca3af",fontWeight:600,fontSize:"0.68rem"}},"/"+m.noteMax+" ×"+m.coeff)
+                )),
+                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",minWidth:75,background:"#f0fdf4",color:"#166534",fontWeight:900}},"Moy/20"),
+                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",width:36}})
+              )
+            ),
+            React.createElement("tbody",null,
+              ...eleves.map((e,i)=>{
+                const moy=getMoy(e.id);const mt=moy?getMention(moy):null;
+                return React.createElement("tr",{key:e.id,style:{background:i%2===0?"white":"#fafafa",borderBottom:"1px solid #f1f5f9"}},
+                  React.createElement("td",{style:{padding:"5px 10px",fontWeight:700,position:"sticky",left:0,background:i%2===0?"white":"#fafafa",borderRight:"1px solid #e5e7eb"}},
+                    e.nom,React.createElement("br"),React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},e.prenom)
+                  ),
+                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",color:e.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},e.sexe),
+                  ...cnv.matieres.map(m=>React.createElement("td",{key:m.nom,style:{padding:"3px 5px",textAlign:"center"}},
+                    React.createElement("input",{type:"number",min:"0",max:m.noteMax,step:"0.25",
+                      value:notes[e.id]?.[m.nom]??"",
+                      onChange:ev=>setNote(e.id,m.nom,ev.target.value),
+                      style:{width:66,border:"1.5px solid #e5e7eb",borderRadius:6,padding:"4px 5px",textAlign:"center",fontSize:"0.85rem",outline:"none",fontFamily:"inherit"},
+                      onFocus:ev=>{ev.target.style.borderColor="#d97706";ev.target.style.background="#fffbeb";},
+                      onBlur:ev=>{ev.target.style.borderColor="#e5e7eb";ev.target.style.background="white";}
+                    })
+                  )),
+                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",background:"#f0fdf4",fontWeight:900,color:mt?.color||"#9ca3af"}},moy||"—"),
+                  React.createElement("td",{style:{padding:"3px 5px",textAlign:"center"}},
+                    React.createElement("button",{onClick:()=>suppElv(e.id),style:{background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:5,padding:"3px 7px",cursor:"pointer",fontWeight:900,fontSize:"0.75rem"}},"✕")
+                  )
+                );
+              })
+            )
+          )
+        )
+      )
+    )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE SYNTHÈSES
+// ═══════════════════════════════════════════════════
+const PageSynthese=({session,toast})=>{
+  const {inspKey}=session;
+  const isEx=session.type==="examens";
+  const [ecoles,setEcoles]=useState({});
+  const [allCnv,setAllCnv]=useState({});
+  const [cfg,setCfg]=useState({});
+  const [f,setF]=useState({ecoleId:isEx?"":session.ecole?.id||"",classe:"",compNum:"",annee:""});
+  const [synthese,setSynthese]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [genLoading,setGenLoading]=useState(false);
+
+  useEffect(()=>{
+    Promise.all([SHARED.get(inspKey,"ecoles",{}),SHARED.get(inspKey,"canevas",{}),SHARED.get(inspKey,"config",{})])
+      .then(([e,c,cf])=>{setEcoles(e);setAllCnv(c);setCfg(cf);setLoading(false);});
+  },[]);
+
+  const ecoleName=id=>ecoles[id]?.nom||"?";
+  const ecoleInfo=id=>ecoles[id]||{};
+
+  const generer=async()=>{
+    setGenLoading(true);setSynthese(null);
+    const myCnv=Object.values(allCnv).filter(c=>{
+      if(!isEx&&c.ecoleId!==session.ecole?.id) return false;
+      if(f.ecoleId&&c.ecoleId!==f.ecoleId) return false;
+      if(f.classe&&c.classe!==f.classe) return false;
+      if(f.compNum&&c.compNum!==f.compNum) return false;
+      if(f.annee&&c.annee!==f.annee) return false;
+      return true;
+    });
+    if(!myCnv.length){setGenLoading(false);toast("Aucun canevas trouvé pour ces critères","err");return;}
+
+    const results=await Promise.all(myCnv.map(async c=>{
+      const [elv,nts]=await Promise.all([SHARED.get(inspKey,"elv_"+c.id,[]),SHARED.get(inspKey,"nts_"+c.id,{})]);
+      const syn=calcSynthese(elv,nts,c.matieres);
+      const inf=ecoleInfo(c.ecoleId);
+      return syn?{...syn,canevas:c,ecoleName:inf.nom||"?",directeur:inf.directeur||"",
+        secteur:inf.secteur||"",sousPrefect:inf.sousPrefect||"",commune:inf.commune||""}:null;
+    }));
+
+    const res=results.filter(Boolean);
+    setGenLoading(false);
+    if(!res.length){toast("Aucune note saisie pour ces critères","err");return;}
+    setSynthese(res);
+  };
+
+  const global=synthese?{
+    total:synthese.reduce((s,r)=>s+r.total,0),
+    admis:synthese.reduce((s,r)=>s+r.admis,0),
+    echec:synthese.reduce((s,r)=>s+r.echec,0),
+    garcons:synthese.reduce((s,r)=>s+r.resultats.filter(e=>e.sexe==="M").length,0),
+    filles:synthese.reduce((s,r)=>s+r.resultats.filter(e=>e.sexe==="F").length,0),
+    moy:synthese.reduce((s,r)=>s+r.moyClasse*r.total,0)/synthese.reduce((s,r)=>s+r.total,0),
+  }:null;
+
+  const doExport=()=>{
+    if(!synthese)return;
+    const rows=[[`COMPOS SAKASSOU — ${cfg.inspection||"IEPP"}`],[`${f.compNum||"Toutes compos"} · ${f.annee||""}`],[`Généré le ${new Date().toLocaleDateString("fr-FR")}`],[],
+      ["École","Secteur","Sous-Préfecture","Commune","Classe","Compos.","Rang","NOM","Prénoms","Sexe","Moy/20","Mention","Décision"]];
+    synthese.forEach(s=>s.resultats.forEach(r=>{
+      rows.push([s.ecoleName,s.secteur,s.sousPrefect,s.commune,s.canevas.classe,s.canevas.compNum,r.rang,r.nom,r.prenom,r.sexe,r.moyenne.toFixed(2),getMention(r.moyenne).label,r.moyenne>=10?"Admis(e)":"Redoublant(e)"]);
+    }));
+    exportCSV(rows,"synthese_compos_sakassou_"+Date.now()+".csv");
+    toast("Export CSV réussi !");
+  };
+
+  if(loading) return React.createElement(Loader,{msg:"Chargement des données..."});
+
+  return React.createElement("div",{style:{maxWidth:1000,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#0f766e,#0d9488)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"📊 Synthèses & Rapports"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Données de toutes les écoles · Secteur · Commune · Sous-Préfecture · Inspection"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    React.createElement(Card,null,
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:12}},
+        isEx&&React.createElement(Sel,{label:"École",value:f.ecoleId,onChange:v=>setF({...f,ecoleId:v}),options:Object.values(ecoles).map(e=>({v:e.id,l:e.nom}))}),
+        React.createElement(Sel,{label:"Classe",value:f.classe,onChange:v=>setF({...f,classe:v}),options:CLASSES}),
+        React.createElement(Sel,{label:"Composition",value:f.compNum,onChange:v=>setF({...f,compNum:v}),options:COMPOSITIONS}),
+        React.createElement(Sel,{label:"Année scolaire",value:f.annee,onChange:v=>setF({...f,annee:v}),options:ANNEES})
+      ),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:generer,color:"#0f766e",icon:"⚡",disabled:genLoading},genLoading?"Chargement...":"Générer la synthèse"),
+        synthese&&React.createElement(Btn,{outline:true,color:"#0f766e",onClick:doExport,icon:"📥"},"Exporter CSV"),
+        synthese&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>window.print(),icon:"🖨️"},"Imprimer / PDF")
+      )
+    ),
+
+    genLoading&&React.createElement(Loader,{msg:"Récupération des données de toutes les écoles..."}),
+
+    synthese&&React.createElement(React.Fragment,null,
+      React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdfa,#ccfbf1)",border:"2px solid #99f6e4"}},
+        React.createElement("div",{style:{fontWeight:900,color:"#0f766e",marginBottom:12}},"📈 Résumé Global — "+(cfg.inspection||"Inspection")+" · "+(f.compNum||"Toutes compositions")),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}},
+          React.createElement(StatBox,{val:global.total,label:"Total élèves",color:"#0f766e",icon:"👥"}),
+          React.createElement(StatBox,{val:global.admis,label:"Admis(es)",color:"#166534",icon:"✅"}),
+          React.createElement(StatBox,{val:global.echec,label:"Redoublants",color:"#dc2626",icon:"❌"}),
+          React.createElement(StatBox,{val:(global.admis/global.total*100).toFixed(1)+"%",label:"Taux réussite",color:"#d97706",icon:"📈"}),
+          React.createElement(StatBox,{val:global.garcons,label:"Garçons",color:"#2563eb",icon:"👦"}),
+          React.createElement(StatBox,{val:global.filles,label:"Filles",color:"#db2777",icon:"👧"})
+        ),
+        React.createElement("div",{style:{marginTop:12,background:"white",borderRadius:10,padding:12,textAlign:"center",border:"2px solid #99f6e4"}},
+          React.createElement("div",{style:{fontSize:"1.8rem",fontWeight:900,color:"#0f766e"}},global.moy.toFixed(2)+"/20"),
+          React.createElement("div",{style:{color:"#6b7280",fontWeight:700,fontSize:"0.75rem"}},"MOYENNE GÉNÉRALE"),
+          React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},getMention(global.moy).label)
+        )
+      ),
+
+      ...synthese.map((s,idx)=>React.createElement(Card,{key:idx,style:{padding:0,overflow:"hidden"}},
+        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#0f766e,#0d9488)",color:"white",display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8}},
+          React.createElement("div",null,
+            React.createElement("div",{style:{fontWeight:900}},s.ecoleName),
+            React.createElement("div",{style:{fontSize:"0.76rem",opacity:0.9,marginTop:2,display:"flex",gap:10,flexWrap:"wrap"}},
+              s.directeur&&React.createElement("span",null,"👤 "+s.directeur),
+              s.secteur&&React.createElement("span",null,"🎓 "+s.secteur),
+              s.sousPrefect&&React.createElement("span",null,"📍 "+s.sousPrefect),
+              s.commune&&React.createElement("span",null,"🏘️ "+s.commune)
+            ),
+            React.createElement("div",{style:{fontSize:"0.75rem",opacity:0.8,marginTop:2}},s.canevas.classe+" · "+s.canevas.compNum+" · "+s.canevas.annee)
+          ),
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+            React.createElement(Badge,{color:"white",bg:"rgba(255,255,255,0.2)"},"👥 "+s.total),
+            React.createElement(Badge,{color:"white",bg:"rgba(22,163,74,0.5)"},"✅ "+s.admis+" ("+s.taux.toFixed(0)+"%)"),
+            React.createElement(Badge,{color:"white",bg:"rgba(146,64,14,0.5)"},"📊 "+s.moyClasse.toFixed(2)+"/20")
+          )
+        ),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",borderBottom:"1px solid #e5e7eb"}},
+          ...[{l:"Effectif",v:s.total,c:"#0f766e"},{l:"Admis",v:s.admis,c:"#166534"},{l:"Échec",v:s.echec,c:"#dc2626"},{l:"Taux",v:s.taux.toFixed(1)+"%",c:"#d97706"},{l:"Moy/20",v:s.moyClasse.toFixed(2),c:"#7c3aed"}].map(x=>
+            React.createElement("div",{key:x.l,style:{padding:"8px 6px",textAlign:"center",borderRight:"1px solid #e5e7eb"}},
+              React.createElement("div",{style:{fontWeight:900,color:x.c}},x.v),
+              React.createElement("div",{style:{fontSize:"0.65rem",color:"#6b7280",fontWeight:700,textTransform:"uppercase"}},x.l)
+            )
+          )
+        ),
+        React.createElement("div",{style:{overflowX:"auto"}},
+          React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
+            React.createElement("thead",null,
+              React.createElement("tr",{style:{background:"#f8fafc"}},
+                ...["Rang","NOM & Prénoms","Sx","Moy/20","Mention","Décision"].map(h=>
+                  React.createElement("th",{key:h,style:{padding:"7px 10px",borderBottom:"1px solid #e5e7eb",textAlign:h==="NOM & Prénoms"?"left":"center",color:"#374151",fontWeight:800,fontSize:"0.78rem"}},h)
+                )
+              )
+            ),
+            React.createElement("tbody",null,
+              ...s.resultats.map((r,i)=>{
+                const mt=getMention(r.moyenne);
+                return React.createElement("tr",{key:r.id,style:{background:i%2===0?"white":"#fafafa",borderBottom:"1px solid #f1f5f9"}},
+                  React.createElement("td",{style:{padding:"6px 10px",textAlign:"center",fontWeight:900,color:r.rang<=3?"#d97706":"#374151"}},r.rang===1?"🥇":r.rang===2?"🥈":r.rang===3?"🥉":r.rang),
+                  React.createElement("td",{style:{padding:"6px 10px",fontWeight:700}},r.nom,React.createElement("br"),React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},r.prenom)),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:r.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},r.sexe),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:900,color:mt.color}},r.moyenne.toFixed(2)),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label)),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:r.moyenne>=10?"#166534":"#dc2626",bg:r.moyenne>=10?"#d1fae5":"#fee2e2"},r.moyenne>=10?"✅ Admis(e)":"❌ Redoublant(e)"))
+                );
+              })
+            )
+          )
+        )
+      )),
+
+      synthese.length>1&&React.createElement(Card,{style:{padding:0,overflow:"hidden"}},
+        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",color:"white",fontWeight:900}},"🏛️ Tableau Récapitulatif — "+(cfg.inspection||"Inspection IEPP")),
+        React.createElement("div",{style:{overflowX:"auto"}},
+          React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.79rem"}},
+            React.createElement("thead",null,
+              React.createElement("tr",{style:{background:"#f0fdf4"}},
+                ...["École","Secteur","Sous-Préf.","Commune","Classe","Compos.","Effectif","Admis","Échec","Taux %","Moy/20","Mention"].map(h=>
+                  React.createElement("th",{key:h,style:{padding:"7px 8px",borderBottom:"2px solid #d1fae5",fontWeight:800,color:"#166534",textAlign:["École","Secteur","Sous-Préf.","Commune"].includes(h)?"left":"center"}},h)
+                )
+              )
+            ),
+            React.createElement("tbody",null,
+              ...synthese.map((s,i)=>{
+                const mt=getMention(s.moyClasse);
+                return React.createElement("tr",{key:i,style:{borderBottom:"1px solid #f0fdf4",background:i%2===0?"white":"#fafafa"}},
+                  React.createElement("td",{style:{padding:"6px 8px",fontWeight:700,whiteSpace:"nowrap"}},s.ecoleName),
+                  React.createElement("td",{style:{padding:"6px 8px",fontSize:"0.75rem",color:"#7c3aed"}},s.secteur||"—"),
+                  React.createElement("td",{style:{padding:"6px 8px",fontSize:"0.75rem",color:"#0891b2"}},s.sousPrefect||"—"),
+                  React.createElement("td",{style:{padding:"6px 8px",fontSize:"0.75rem",color:"#166534"}},s.commune||"—"),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:"#1d4ed8"},s.canevas.classe)),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:"#7c3aed"},s.canevas.compNum)),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:700}},s.total),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:"#166534",fontWeight:800}},s.admis),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:"#dc2626",fontWeight:700}},s.echec),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:800,color:s.taux>=50?"#166534":"#dc2626"}},s.taux.toFixed(1)+"%"),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:900,color:mt.color}},s.moyClasse.toFixed(2)+"/20"),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label))
+                );
+              }),
+              React.createElement("tr",{style:{background:"#f0fdf4",borderTop:"2px solid #86efac",fontWeight:900}},
+                React.createElement("td",{colSpan:6,style:{padding:"9px 10px",color:"#166534",fontWeight:900}},"📊 TOTAUX GÉNÉRAUX"),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#0f766e"}},global.total),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#166534"}},global.admis),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#dc2626"}},global.echec),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:global.admis/global.total>=0.5?"#166534":"#dc2626"}},(global.admis/global.total*100).toFixed(1)+"%"),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#0f766e",fontWeight:900}},global.moy.toFixed(2)+"/20"),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center"}},React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},getMention(global.moy).label))
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// PAGE MOT DE PASSE
+// ═══════════════════════════════════════════════════
+const PageMotDePasse=({session,toast})=>{
+  const {inspKey}=session;
+  const isEx=session.type==="examens";
+  const [nLogin,setNLogin]=useState("");
+  const [nPass,setNPass]=useState("");
+  const [cPass,setCPass]=useState("");
+  const [nTel,setNTel]=useState("");
+  const [cTel,setCTel]=useState("");
+
+  const changerEx=()=>{
+    if(!nLogin||!nPass) return toast("Remplissez tous les champs","err");
+    if(nPass!==cPass) return toast("Les mots de passe ne correspondent pas","err");
+    LOCAL.set("examens_creds",{login:nLogin,password:nPass});
+    toast("Identifiants mis à jour !");
+    setNLogin("");setNPass("");setCPass("");
+  };
+
+  const changerTel=async()=>{
+    if(!nTel) return toast("Entrez le nouveau numéro","err");
+    if(nTel!==cTel) return toast("Les numéros ne correspondent pas","err");
+    const ec=await SHARED.get(inspKey,"ecoles",{});
+    ec[session.ecole.id]={...ec[session.ecole.id],tel:nTel};
+    const ok=await SHARED.set(inspKey,"ecoles",ec);
+    if(ok) toast("Numéro mis à jour ! Reconnectez-vous.");
+    else toast("Erreur de synchronisation","err");
+    setNTel("");setCTel("");
+  };
+
+  return React.createElement("div",{style:{maxWidth:520,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}},
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#1e40af,#2563eb)",borderRadius:18,padding:22,color:"white"}},
+      React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"🔐 Modifier les Identifiants"),
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},isEx?"Identifiant et mot de passe (stockés localement)":"Numéro de téléphone (synchronisé)"),
+      React.createElement("div",{style:{marginTop:8}},React.createElement(SyncBadge,{inspKey}))
+    ),
+    isEx
+      ?React.createElement(Card,null,
+          React.createElement("div",{style:{fontWeight:800,color:"#1e40af",marginBottom:14}},"🏛️ Service Examens & Concours"),
+          React.createElement("div",{style:{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 12px",fontSize:"0.8rem",color:"#1e40af",fontWeight:600,marginBottom:14}},
+            "🔒 Les identifiants Examens & Concours sont stockés localement (non partagés)."
+          ),
+          React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+            React.createElement(Inp,{label:"Nouvel identifiant",value:nLogin,onChange:setNLogin,req:true}),
+            React.createElement(Inp,{label:"Nouveau mot de passe",type:"password",value:nPass,onChange:setNPass,req:true}),
+            React.createElement(Inp,{label:"Confirmer le mot de passe",type:"password",value:cPass,onChange:setCPass,req:true}),
+            React.createElement(Btn,{onClick:changerEx,color:"#1e40af",icon:"💾"},"Enregistrer")
+          )
+        )
+      :React.createElement(Card,null,
+          React.createElement("div",{style:{fontWeight:800,color:"#1e40af",marginBottom:4}},"🏫 "+session.ecole?.nom),
+          React.createElement("div",{style:{color:"#6b7280",fontSize:"0.83rem",marginBottom:14}},"Code école : ",React.createElement("strong",null,session.ecole?.code)),
+          React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+            React.createElement(Inp,{label:"Nouveau numéro de téléphone",value:nTel,onChange:setNTel,placeholder:"Ex: 0701020304",req:true}),
+            React.createElement(Inp,{label:"Confirmer le numéro",value:cTel,onChange:setCTel,placeholder:"Répétez",req:true}),
+            React.createElement("div",{style:{background:"#fef3c7",border:"1px solid #fde68a",borderRadius:8,padding:"10px 12px",fontSize:"0.8rem",color:"#92400e",fontWeight:600}},
+              "⚠️ Après modification, reconnectez-vous avec le nouveau numéro."
+            ),
+            React.createElement(Btn,{onClick:changerTel,color:"#1e40af",icon:"💾"},"Enregistrer")
+          )
+        )
+  );
+};
+
+// ═══════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════
+const initApp=async()=>{
+  if(!LOCAL.has("examens_creds")) LOCAL.set("examens_creds",{login:"sami2026",password:"compos"});
+  if(!LOCAL.has("inspKey")) LOCAL.set("inspKey","sakassou");
+  const inspKey=LOCAL.get("inspKey","sakassou");
+  try{
+    const exists=await SHARED.get(inspKey,"config",null);
+    if(!exists){
+      await SHARED.set(inspKey,"config",{inspection:"IEPP de Sakassou",prefecture:"Sakassou",sousPrefect:"Sakassou",commune:"Sakassou",secteur:"",annee:"2024-2025"});
+      await SHARED.set(inspKey,"ecoles",{});
+      await SHARED.set(inspKey,"canevas",{});
+    }
+  }catch{}
+};
+
+// ═══════════════════════════════════════════════════
+// MENUS
+// ═══════════════════════════════════════════════════
+const PAGES_EX=[
+  {id:"config",   label:"⚙️ Config",       color:"#166534"},
+  {id:"ecoles",   label:"🏫 Écoles",       color:"#1d4ed8"},
+  {id:"canevas",  label:"📋 Canevas",      color:"#7c3aed"},
+  {id:"saisie",   label:"✏️ Saisie",       color:"#b45309"},
+  {id:"synthese", label:"📊 Synthèses",    color:"#0f766e"},
+  {id:"password", label:"🔐 Identifiants", color:"#1e40af"},
+];
+const PAGES_EC=[
+  {id:"monecole", label:"🏫 Mon École",    color:"#1d4ed8"},
+  {id:"canevas",  label:"📋 Canevas",      color:"#7c3aed"},
+  {id:"saisie",   label:"✏️ Saisie",       color:"#b45309"},
+  {id:"synthese", label:"📊 Synthèses",    color:"#0f766e"},
+  {id:"password", label:"🔐 Mon accès",    color:"#1e40af"},
+];
+
+// ═══════════════════════════════════════════════════
+// APP
+// ═══════════════════════════════════════════════════
+const App=()=>{
+  const [session,setSession]=useState(null);
+  const [page,setPage]=useState("saisie");
+  const [toastData,setToastData]=useState(null);
+  const [appReady,setAppReady]=useState(false);
+
+  useEffect(()=>{initApp().then(()=>setAppReady(true));}, []);
+
+  const toast=(msg,type="success")=>{
+    setToastData({msg,type});
+    setTimeout(()=>setToastData(null),3500);
+  };
+
+  const onLogin=s=>{
+    setSession(s);
+    setPage(s.type==="examens"?"config":"monecole");
+  };
+
+  if(!appReady) return React.createElement("div",{
+    style:{minHeight:"100vh",background:"linear-gradient(135deg,#14532d,#166534 50%,#ca8a04)",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:14}
+  },
+    React.createElement("div",{className:"spin",style:{fontSize:"3rem"}},"📝"),
+    React.createElement("div",{style:{color:"white",fontWeight:700,fontSize:"1rem"}},"Initialisation...")
+  );
+
+  if(!session) return React.createElement(PageLogin,{onLogin});
+
+  const pages=session.type==="examens"?PAGES_EX:PAGES_EC;
+
+  return React.createElement("div",null,
+    toastData&&React.createElement("div",{
+      style:{position:"fixed",top:18,right:18,zIndex:9999,
+        background:toastData.type==="success"?"#166534":"#dc2626",
+        color:"white",padding:"11px 18px",borderRadius:12,fontWeight:700,fontSize:"0.85rem",
+        boxShadow:"0 8px 24px rgba(0,0,0,0.2)",animation:"fi 0.3s ease",maxWidth:320}
+    },(toastData.type==="success"?"✅ ":"❌ ")+toastData.msg),
+
+    React.createElement("div",{className:"no-print",style:{background:"linear-gradient(135deg,#14532d,#166534 40%,#ca8a04 100%)",boxShadow:"0 4px 18px rgba(0,0,0,0.2)",position:"sticky",top:0,zIndex:100}},
+      React.createElement("div",{style:{maxWidth:1000,margin:"0 auto",padding:"0 14px"}},
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"12px 0 10px"}},
+          React.createElement("div",{style:{width:46,height:46,borderRadius:13,background:"linear-gradient(135deg,#fbbf24,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"1.4rem",boxShadow:"0 2px 8px rgba(0,0,0,0.2)",flexShrink:0}},"📝"),
+          React.createElement("div",{style:{flex:1}},
+            React.createElement("div",{style:{color:"white",fontWeight:900,fontSize:"1.15rem",letterSpacing:"-0.3px"}},"COMPOS SAKASSOU"),
+            React.createElement("div",{style:{color:"rgba(255,255,255,0.75)",fontSize:"0.7rem",fontWeight:600}},
+              session.type==="examens"?"🏛️ Service Examens & Concours":"🏫 "+session.ecole?.nom
+            )
+          ),
+          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexShrink:0}},
+            React.createElement(SyncBadge,{inspKey:session.inspKey}),
+            React.createElement("button",{
+              onClick:()=>setSession(null),
+              style:{background:"rgba(255,255,255,0.15)",color:"white",border:"1.5px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:"0.75rem",fontWeight:700,fontFamily:"inherit"}
+            },"🚪 Déco.")
+          )
+        ),
+        React.createElement("div",{style:{display:"flex",gap:4,flexWrap:"wrap",paddingBottom:10,overflowX:"auto"}},
+          ...pages.map(p=>React.createElement("button",{
+            key:p.id,onClick:()=>setPage(p.id),
+            style:{background:page===p.id?"white":"rgba(255,255,255,0.12)",
+              color:page===p.id?p.color:"white",
+              border:page===p.id?"2px solid white":"2px solid rgba(255,255,255,0.22)",
+              borderRadius:9,padding:"6px 13px",fontWeight:800,fontSize:"0.76rem",
+              cursor:"pointer",transition:"all 0.15s",fontFamily:"inherit",whiteSpace:"nowrap"}
+          },p.label))
+        )
+      )
+    ),
+
+    React.createElement("div",{style:{background:"#f1f5f9",minHeight:"calc(100vh - 108px)",padding:"18px 14px"}},
+      React.createElement("div",{style:{maxWidth:1000,margin:"0 auto"}},
+        page==="config"   && session.type==="examens" && React.createElement(PageConfig,{session,toast}),
+        page==="ecoles"   && session.type==="examens" && React.createElement(PageEcoles,{session,toast}),
+        page==="canevas"  && React.createElement(PageCanevas,{session,toast}),
+        page==="saisie"   && React.createElement(PageSaisie,{session,toast}),
+        page==="synthese" && React.createElement(PageSynthese,{session,toast}),
+        page==="monecole" && session.type==="ecole"   && React.createElement(PageMonEcole,{session,toast}),
+        page==="password" && React.createElement(PageMotDePasse,{session,toast})
+      )
+    ),
+
+    React.createElement("div",{className:"no-print",style:{background:"#1e293b",color:"#64748b",textAlign:"center",padding:"12px",fontSize:"0.72rem",fontWeight:600}},
+      "COMPOS SAKASSOU v4.1 · 🔄 Synchronisation partagée · CP1→CM2 · Canevas définis par Examens & Concours"
+    )
+  );
+};
+
+ReactDOM.render(React.createElement(App), document.getElementById("root"));
+</script>
+</body>
+</html>
