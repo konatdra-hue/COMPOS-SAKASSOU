@@ -145,7 +145,13 @@ const calcMoy=(notesElv,matieres)=>{
   let pts=0,coef=0;
   (matieres||[]).forEach(m=>{
     const n=parseFloat(notesElv?.[m.nom]);
-    if(!isNaN(n)&&n>=0){pts+=n*parseFloat(m.coeff||1);coef+=parseFloat(m.coeff||1);}
+    const noteMax=parseFloat(m.noteMax||20);
+    const c=parseFloat(m.coeff||1);
+    if(!isNaN(n)&&n>=0&&noteMax>0){
+      // Normalise la note sur 20 avant d'appliquer le coefficient
+      pts+=(n/noteMax)*20*c;
+      coef+=c;
+    }
   });
   return coef>0?pts/coef:null;
 };
