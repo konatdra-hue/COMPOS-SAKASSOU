@@ -623,7 +623,8 @@ const PageCanevas=({session,toast})=>{
   const isEx=session.type==="examens";
   const [ecoles,setEcoles]=useState({});
   const [canevas,setCanevas]=useState({});
-  const [form,setForm]=useState({ecoleId:isEx?"":session.ecole?.id||"",classe:"",compNum:"",annee:"2024-2025"});
+  // Plus de champ ecoleId — le canevas est GLOBAL (toutes écoles)
+  const [form,setForm]=useState({classe:"",compNum:"",annee:"2024-2025"});
   const [mats,setMats]=useState([{nom:"",coeff:"2",noteMax:"20"}]);
   const [editId,setEditId]=useState(null);
   const [loading,setLoading]=useState(true);
@@ -641,37 +642,41 @@ const PageCanevas=({session,toast})=>{
   useEffect(()=>{refresh().then(()=>setLoading(false));}, []);
 
   const SUGG={
-    CP1:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d'Éveil",coeff:"1",noteMax:"20"}],
-    CP2:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d'Éveil",coeff:"1",noteMax:"20"}],
+    CP1:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"20"}],
+    CP2:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"20"}],
     CE1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
     CE2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
     CM1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
     CM2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
   };
 
-  const ecoleName=id=>ecoles[id]?.nom||"?";
-
   const sauver=async()=>{
-    const ecId=isEx?form.ecoleId:session.ecole?.id;
-    if(!ecId||!form.classe||!form.compNum) return toast("Remplissez tous les champs obligatoires","err");
+    if(!form.classe||!form.compNum) return toast("Classe et Composition obligatoires","err");
     const validMats=mats.filter(m=>m.nom.trim());
     if(!validMats.length) return toast("Ajoutez au moins une matière","err");
+    // Vérifier doublon classe+compNum+annee
+    const doublon=Object.values(canevas).find(c=>
+      c.classe===form.classe && c.compNum===form.compNum &&
+      c.annee===(form.annee||"2024-2025") && c.id!==editId
+    );
+    if(doublon) return toast("Un canevas "+form.classe+" / "+form.compNum+" existe déjà pour cette année","err");
     setSaving(true);
     const rc=await DB.getOrCreate("sakassou_canevas",{});
     const c2={...rc?.data||{}};
     const id=editId||`cnv_${Date.now()}`;
-    c2[id]={id,ecoleId:ecId,classe:form.classe,compNum:form.compNum,annee:form.annee||"2024-2025",matieres:validMats};
+    // PAS d\'ecoleId — canevas global
+    c2[id]={id,classe:form.classe,compNum:form.compNum,annee:form.annee||"2024-2025",matieres:validMats};
     const ok=await DB.save("sakassou_canevas",c2);
     setSaving(false);
     if(!ok) return toast("Erreur de sauvegarde","err");
     setCanevas(c2);
-    setForm({ecoleId:isEx?"":session.ecole?.id||"",classe:"",compNum:"",annee:"2024-2025"});
+    setForm({classe:"",compNum:"",annee:"2024-2025"});
     setMats([{nom:"",coeff:"2",noteMax:"20"}]);setEditId(null);
-    toast(editId?"Canevas modifié !":"Canevas créé !");
+    toast(editId?"Canevas modifié !":"Canevas créé pour toutes les écoles !");
   };
 
   const supprimer=async id=>{
-    if(!confirm("Supprimer ce canevas ?")) return;
+    if(!confirm("Supprimer ce canevas ? Il sera retiré pour toutes les écoles.")) return;
     const rc=await DB.getOrCreate("sakassou_canevas",{});
     const c2={...rc.data};delete c2[id];
     await DB.save("sakassou_canevas",c2);
@@ -679,127 +684,190 @@ const PageCanevas=({session,toast})=>{
   };
 
   const editer=c=>{
-    setForm({ecoleId:c.ecoleId,classe:c.classe,compNum:c.compNum,annee:c.annee});
+    setForm({classe:c.classe,compNum:c.compNum,annee:c.annee});
     setMats(c.matieres);setEditId(c.id);window.scrollTo(0,0);
   };
 
   const updMat=(i,k,v)=>{const nm=[...mats];nm[i]={...nm[i],[k]:v};setMats(nm);};
-  const myCanevas=Object.values(canevas).filter(c=>isEx||c.ecoleId===session.ecole?.id);
 
-  // ── Impression canevas UN seul ──
-  const imprimerCanevasUn=(c)=>{
-    const cfg2={}; // on utilise le nom d'école
-    const eName=ecoleName(c.ecoleId);
+  // Tous les canevas (aucun filtre par école)
+  const tousCanevas=Object.values(canevas).sort((a,b)=>
+    CLASSES.indexOf(a.classe)-CLASSES.indexOf(b.classe)||
+    COMPOSITIONS.indexOf(a.compNum)-COMPOSITIONS.indexOf(b.compNum)
+  );
+
+  // ── Impression canevas 1 niveau → toutes écoles (1 feuille/école) ──
+  const imprimerParNiveau=(c)=>{
+    const listeEcoles=Object.values(ecoles);
+    if(!listeEcoles.length){alert("Aucune école enregistrée.");return;}
     const nbLignes=30;
-    let html2=`
-<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/>
-<title>Canevas ${eName} - ${c.classe} - ${c.compNum}</title>
+    let doc=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/>
+<title>Canevas ${c.classe} - ${c.compNum}</title>
 <style>
-  body{font-family:Arial,sans-serif;margin:20px;font-size:11px;}
-  h2{text-align:center;font-size:13px;margin:4px 0;}
-  h3{text-align:center;font-size:11px;font-weight:normal;margin:2px 0 10px;}
-  table{width:100%;border-collapse:collapse;margin-top:8px;}
-  th{background:#166534;color:white;padding:5px 4px;text-align:center;font-size:10px;border:1px solid #ccc;}
-  td{border:1px solid #ccc;padding:4px;text-align:center;font-size:10px;}
-  td.nom{text-align:left;min-width:140px;}
-  .check-cell{width:28px;}
-  .sig{margin-top:30px;display:flex;justify-content:space-between;}
-  @media print{body{margin:10px;}}
-</style></head><body>
-<h2>INSPECTION DE L'ENSEIGNEMENT PRIMAIRE ET PRÉSCOLAIRE</h2>
-<h2>CANEVAS DE SAISIE DES NOTES — ${c.compNum.toUpperCase()} · ${c.annee}</h2>
-<h3>École : <strong>${eName}</strong> &nbsp;|&nbsp; Classe : <strong>${c.classe}</strong></h3>
+  *{box-sizing:border-box;}
+  body{font-family:Arial,sans-serif;margin:0;font-size:10px;}
+  .page{padding:14px 16px;page-break-after:always;}
+  .page:last-child{page-break-after:avoid;}
+  .entete{text-align:center;margin-bottom:6px;}
+  .entete h1{font-size:12px;margin:2px 0;text-transform:uppercase;}
+  .entete h2{font-size:11px;margin:2px 0;}
+  .entete h3{font-size:10px;font-weight:normal;margin:2px 0 6px;}
+  .infos{display:flex;justify-content:space-between;margin-bottom:4px;font-size:9px;border:1px solid #ccc;padding:4px 8px;border-radius:4px;background:#f9fafb;}
+  table{width:100%;border-collapse:collapse;}
+  th{background:#166534;color:white;padding:4px 3px;text-align:center;font-size:9px;border:1px solid #555;}
+  th.left{text-align:left;}
+  td{border:1px solid #ccc;padding:0 2px;text-align:center;font-size:9px;height:16px;}
+  td.nom{text-align:left;min-width:120px;}
+  .stats{margin-top:5px;font-size:9px;color:#444;display:flex;gap:20px;}
+  .sig{margin-top:16px;display:flex;justify-content:space-between;font-size:9px;}
+  @media print{body{margin:0;}.page{padding:10px 12px;}}
+</style></head><body>`;
+
+    listeEcoles.forEach((ecole,idx)=>{
+      const isLast=idx===listeEcoles.length-1;
+      doc+=`<div class="page">
+<div class="entete">
+  <h1>Inspection de l\'Enseignement Primaire et Préscolaire de Sakassou</h1>
+  <h2>Canevas de Saisie des Notes — ${c.compNum} · Année ${c.annee}</h2>
+  <h3>Classe : <strong>${c.classe}</strong></h3>
+</div>
+<div class="infos">
+  <span>École : <strong>${ecole.nom}</strong></span>
+  <span>Directeur(trice) : <strong>${ecole.directeur||"_______________"}</strong></span>
+  <span>Code : <strong>${ecole.code}</strong></span>
+</div>
 <table>
 <thead><tr>
-  <th style="width:30px">N°</th>
-  <th class="nom" style="text-align:left">NOM & PRÉNOMS</th>
-  <th style="width:22px">Sx</th>`;
-    c.matieres.forEach(m=>{html2+=`<th>${m.nom}<br/><span style="font-size:9px">/${m.noteMax} ×${m.coeff}</span></th>`;});
-    html2+=`<th style="background:#ca8a04">MOY/20</th>
-  <th style="width:28px;background:#dc2626">✓</th>
-</tr></thead><tbody>`;
-    for(let i=1;i<=nbLignes;i++){
-      html2+=`<tr><td>${i}</td><td class="nom">&nbsp;</td><td>&nbsp;</td>`;
-      c.matieres.forEach(()=>{html2+=`<td>&nbsp;</td>`;});
-      html2+=`<td>&nbsp;</td><td class="check-cell"><input type="checkbox"/></td></tr>`;
-    }
-    html2+=`</tbody></table>
-<div style="margin-top:8px;font-size:10px;color:#666">Nombre d'élèves : _____ &nbsp;&nbsp; Admis : _____ &nbsp;&nbsp; Taux : _____%</div>
-<div class="sig">
-  <div>Le Directeur(trice)<br/><br/><br/>____________________</div>
-  <div>Visa Inspecteur<br/><br/><br/>____________________</div>
-</div>
-</body></html>`;
-    const w=window.open("","_blank","width=900,height=700");
-    w.document.write(html2);w.document.close();
-    setTimeout(()=>w.print(),500);
-  };
-
-  // ── Impression canevas TOUTES écoles ──
-  const imprimerCanevassToutes=()=>{
-    if(!myCanevas.length) return;
-    const nbLignes=30;
-    let html2=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/><title>Canevas Toutes Écoles</title>
-<style>
-  body{font-family:Arial,sans-serif;margin:15px;font-size:10px;}
-  h1{text-align:center;font-size:13px;margin:4px 0;}
-  h2{text-align:center;font-size:11px;margin:2px 0 6px;}
-  h3{text-align:center;font-size:10px;font-weight:normal;margin:2px 0 8px;}
-  table{width:100%;border-collapse:collapse;margin-top:6px;}
-  th{background:#166534;color:white;padding:4px 3px;text-align:center;font-size:9px;border:1px solid #999;}
-  td{border:1px solid #ccc;padding:3px 2px;text-align:center;font-size:9px;height:18px;}
-  td.nom{text-align:left;min-width:130px;}
-  .page-break{page-break-after:always;margin-bottom:20px;}
-  .stats{margin-top:6px;font-size:9px;color:#555;}
-  .sig{margin-top:20px;display:flex;justify-content:space-between;font-size:9px;}
-  @media print{.page-break{page-break-after:always;} body{margin:8px;}}
-</style></head><body>`;
-    myCanevas.forEach((c,idx)=>{
-      const eName=ecoleName(c.ecoleId);
-      const isLast=idx===myCanevas.length-1;
-      html2+=`<div class="${isLast?"":"page-break"}">
-<h1>INSPECTION DE L'ENSEIGNEMENT PRIMAIRE ET PRÉSCOLAIRE DE SAKASSOU</h1>
-<h2>CANEVAS DE SAISIE — ${c.compNum.toUpperCase()} · ${c.annee}</h2>
-<h3>École : <strong>${eName}</strong> &nbsp;|&nbsp; Classe : <strong>${c.classe}</strong></h3>
-<table><thead><tr>
-  <th style="width:25px">N°</th>
-  <th style="text-align:left;min-width:130px">NOM & PRÉNOMS</th>
-  <th style="width:18px">Sx</th>`;
-      c.matieres.forEach(m=>{html2+=`<th>${m.nom}<br/><span style="font-size:8px">/${m.noteMax}×${m.coeff}</span></th>`;});
-      html2+=`<th style="background:#ca8a04;font-weight:900">MOY</th>
-  <th style="width:24px;background:#15803d">✓</th>
+  <th style="width:22px">N°</th>
+  <th class="left" style="min-width:120px">NOM & PRÉNOMS</th>
+  <th style="width:16px">Sx</th>`;
+      c.matieres.forEach(m=>{
+        doc+=`<th>${m.nom}<br/><span style="font-size:8px">/${m.noteMax}×${m.coeff}</span></th>`;
+      });
+      doc+=`<th style="background:#ca8a04;color:white;width:28px">MOY<br/>/20</th>
+  <th style="background:#15803d;color:white;width:22px">✓</th>
 </tr></thead><tbody>`;
       for(let i=1;i<=nbLignes;i++){
-        html2+=`<tr><td>${i}</td><td class="nom">&nbsp;</td><td>&nbsp;</td>`;
-        c.matieres.forEach(()=>{html2+=`<td>&nbsp;</td>`;});
-        html2+=`<td>&nbsp;</td><td><input type="checkbox"/></td></tr>`;
+        const bg=i%2===0?"#f9fafb":"white";
+        doc+=`<tr style="background:${bg}"><td>${i}</td><td class="nom"></td><td></td>`;
+        c.matieres.forEach(()=>{doc+=`<td></td>`;});
+        doc+=`<td></td><td style="text-align:center"><input type="checkbox"/></td></tr>`;
       }
-      html2+=`</tbody></table>
-<div class="stats">Effectif : _______ &nbsp;|&nbsp; Admis : _______ &nbsp;|&nbsp; Filles : _______ &nbsp;|&nbsp; Taux : _______% &nbsp;|&nbsp; Moy. Classe : _______/20</div>
+      doc+=`</tbody></table>
+<div class="stats">
+  <span>Effectif inscrit : _______</span>
+  <span>Filles : _______</span>
+  <span>Admis(es) : _______</span>
+  <span>Échec : _______</span>
+  <span>Taux : _______ %</span>
+  <span>Moy. Classe : _______ /20</span>
+</div>
 <div class="sig">
-  <div>Le Directeur(trice) : ____________________</div>
-  <div>Date : ____________________</div>
-  <div>Visa Inspecteur : ____________________</div>
+  <div>Le Directeur(trice)<br/><br/>____________________________<br/><span style="font-size:8px">(Nom & Signature)</span></div>
+  <div style="text-align:center">Date : ______ / ______ / ________</div>
+  <div style="text-align:right">L\'Inspecteur<br/><br/>____________________________<br/><span style="font-size:8px">(Visa & Cachet)</span></div>
 </div></div>`;
     });
-    html2+=`</body></html>`;
+
+    doc+=`</body></html>`;
     const w=window.open("","_blank","width=1000,height=750");
-    w.document.write(html2);w.document.close();
+    w.document.write(doc);w.document.close();
     setTimeout(()=>w.print(),600);
   };
 
-  // ── Export Excel canevas ──
-  const exporterCanevassExcel=()=>{
+  // ── Impression TOUS les canevas → toutes écoles ──
+  const imprimerTout=()=>{
+    if(!tousCanevas.length){toast("Aucun canevas créé","err");return;}
+    const listeEcoles=Object.values(ecoles);
+    if(!listeEcoles.length){alert("Aucune école enregistrée.");return;}
+    const nbLignes=30;
+    let doc=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/>
+<title>Tous Canevas - Toutes Écoles</title>
+<style>
+  *{box-sizing:border-box;}
+  body{font-family:Arial,sans-serif;margin:0;font-size:10px;}
+  .page{padding:12px 14px;page-break-after:always;}
+  .page:last-child{page-break-after:avoid;}
+  .entete{text-align:center;margin-bottom:5px;}
+  .entete h1{font-size:11px;margin:2px 0;text-transform:uppercase;}
+  .entete h2{font-size:10px;margin:2px 0;}
+  .infos{display:flex;justify-content:space-between;margin-bottom:4px;font-size:9px;border:1px solid #ccc;padding:3px 6px;border-radius:3px;background:#f9fafb;}
+  table{width:100%;border-collapse:collapse;}
+  th{background:#166534;color:white;padding:3px 2px;text-align:center;font-size:8px;border:1px solid #555;}
+  th.left{text-align:left;}
+  td{border:1px solid #ccc;padding:0;text-align:center;font-size:8px;height:15px;}
+  td.nom{text-align:left;min-width:110px;padding-left:2px;}
+  .stats{margin-top:4px;font-size:8px;color:#444;display:flex;gap:12px;flex-wrap:wrap;}
+  .sig{margin-top:12px;display:flex;justify-content:space-between;font-size:8px;}
+  @media print{body{margin:0;}.page{padding:8px 10px;}}
+</style></head><body>`;
+
+    tousCanevas.forEach(c=>{
+      listeEcoles.forEach((ecole,idx)=>{
+        const isLastPage=(c===tousCanevas[tousCanevas.length-1]&&idx===listeEcoles.length-1);
+        doc+=`<div class="page">
+<div class="entete">
+  <h1>Inspection de l\'Enseignement Primaire et Préscolaire de Sakassou</h1>
+  <h2>Canevas de Saisie — ${c.compNum} · ${c.annee} · Classe : <strong>${c.classe}</strong></h2>
+</div>
+<div class="infos">
+  <span>École : <strong>${ecole.nom}</strong></span>
+  <span>Directeur(trice) : <strong>${ecole.directeur||"_______________"}</strong></span>
+  <span>Code : <strong>${ecole.code}</strong></span>
+</div>
+<table><thead><tr>
+  <th style="width:20px">N°</th>
+  <th class="left">NOM & PRÉNOMS</th>
+  <th style="width:15px">Sx</th>`;
+        c.matieres.forEach(m=>{
+          doc+=`<th>${m.nom}<br/><span style="font-size:7px">/${m.noteMax}×${m.coeff}</span></th>`;
+        });
+        doc+=`<th style="background:#ca8a04;color:white;width:26px">MOY</th>
+  <th style="background:#15803d;color:white;width:20px">✓</th>
+</tr></thead><tbody>`;
+        for(let i=1;i<=nbLignes;i++){
+          const bg=i%2===0?"#f9fafb":"white";
+          doc+=`<tr style="background:${bg}"><td>${i}</td><td class="nom"></td><td></td>`;
+          c.matieres.forEach(()=>{doc+=`<td></td>`;});
+          doc+=`<td></td><td><input type="checkbox"/></td></tr>`;
+        }
+        doc+=`</tbody></table>
+<div class="stats">
+  <span>Effectif : _____</span><span>Filles : _____</span>
+  <span>Admis : _____</span><span>Échec : _____</span>
+  <span>Taux : _____%</span><span>Moy. Classe : _____/20</span>
+</div>
+<div class="sig">
+  <div>Le Directeur(trice)<br/><br/>______________________</div>
+  <div>Date : ____ / ____ / ______</div>
+  <div>L\'Inspecteur (Visa)<br/><br/>______________________</div>
+</div></div>`;
+      });
+    });
+    doc+=`</body></html>`;
+    const w=window.open("","_blank","width=1000,height=750");
+    w.document.write(doc);w.document.close();
+    setTimeout(()=>w.print(),700);
+  };
+
+  // ── Export Excel tous canevas ──
+  const exporterExcel=()=>{
+    const listeEcoles=Object.values(ecoles);
     const wb=XLSX.utils.book_new();
-    myCanevas.forEach(c=>{
-      const eName=ecoleName(c.ecoleId).substring(0,20);
-      const sheetName=(eName+"-"+c.classe).substring(0,28);
-      const header=["N°","NOM & PRÉNOMS","Sexe",...c.matieres.map(m=>m.nom+" /"+m.noteMax+" ×"+m.coeff),"MOY/20","✓ Saisi"];
-      const rows=[header];
-      for(let i=1;i<=30;i++) rows.push([i,"","","","",""]);
-      const ws=XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"]=[{wch:4},{wch:28},{wch:5},...c.matieres.map(()=>({wch:12})),{wch:8},{wch:6}];
-      XLSX.utils.book_append_sheet(wb,ws,sheetName);
+    tousCanevas.forEach(c=>{
+      listeEcoles.forEach(ecole=>{
+        const sheetName=(c.classe+"-"+c.compNum.replace("Composition ","C")+"-"+ecole.nom).substring(0,28);
+        const header=["N°","NOM & PRÉNOMS","Sexe",...c.matieres.map(m=>m.nom+" /"+m.noteMax+"×"+m.coeff),"MOY/20","✓"];
+        const rows=[
+          ["École: "+ecole.nom,"","Directeur: "+(ecole.directeur||""),"","Classe: "+c.classe,"",c.compNum,"",c.annee],
+          header
+        ];
+        for(let i=1;i<=30;i++) rows.push([i,"","",...c.matieres.map(()=>""),"",""]);
+        rows.push(["","Effectif:","","Admis:","","Taux:","","Moy Classe:","","Filles:"]);
+        const ws=XLSX.utils.aoa_to_sheet(rows);
+        ws["!cols"]=[{wch:4},{wch:28},{wch:5},...c.matieres.map(()=>({wch:10})),{wch:7},{wch:4}];
+        XLSX.utils.book_append_sheet(wb,ws,sheetName);
+      });
     });
     XLSX.writeFile(wb,"canevas_toutes_ecoles_"+new Date().toISOString().slice(0,10)+".xlsx");
     toast("Canevas exportés en Excel !");
@@ -810,12 +878,26 @@ const PageCanevas=({session,toast})=>{
   return React.createElement("div",{style:{maxWidth:780,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
     React.createElement("div",{style:{background:"linear-gradient(135deg,#7c3aed,#8b5cf6)",borderRadius:18,padding:22,color:"white"}},
       React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"📋 Canevas de Compositions"),
-      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Matières, coefficients, notes maximales")
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},
+        "Un canevas par niveau s\'applique à TOUTES les écoles · "+tousCanevas.length+" canevas créé(s)")
     ),
-    React.createElement(Card,null,
-      React.createElement("div",{style:{fontWeight:800,color:"#7c3aed",marginBottom:12}},editId?"✏️ Modifier":"➕ Créer un canevas"),
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}},
-        isEx&&React.createElement(Sel,{label:"École *",value:form.ecoleId,onChange:v=>setForm({...form,ecoleId:v}),options:Object.values(ecoles).map(e=>({v:e.id,l:e.nom})),req:true}),
+    // Boutons impression globale
+    isEx&&tousCanevas.length>0&&React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdf4,#dcfce7)",border:"2px solid #86efac"}},
+      React.createElement("div",{style:{fontWeight:800,color:"#166534",marginBottom:8}},"🖨️ Impression & Export — Toutes les écoles"),
+      React.createElement("div",{style:{fontSize:"0.8rem",color:"#166534",marginBottom:10}},
+        Object.keys(ecoles).length+" école(s) · "+tousCanevas.length+" canevas → "+
+        (Object.keys(ecoles).length*tousCanevas.length)+" feuilles de saisie au total"),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:imprimerTout,color:"#166534",icon:"🖨️"},"Imprimer TOUT (toutes écoles × tous niveaux)"),
+        React.createElement(Btn,{onClick:exporterExcel,color:"#059669",icon:"📊",outline:true},"Exporter Excel complet")
+      )
+    ),
+    // Formulaire (Examens seulement)
+    isEx&&React.createElement(Card,null,
+      React.createElement("div",{style:{fontWeight:800,color:"#7c3aed",marginBottom:12}},editId?"✏️ Modifier le canevas":"➕ Créer un canevas (pour toutes les écoles)"),
+      React.createElement("div",{style:{background:"#f5f3ff",border:"1px solid #ddd6fe",borderRadius:8,padding:"8px 12px",fontSize:"0.8rem",color:"#6d28d9",fontWeight:600,marginBottom:12}},
+        "ℹ️ Ce canevas sera disponible pour toutes les écoles enregistrées."),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}},
         React.createElement(Sel,{label:"Classe *",value:form.classe,onChange:v=>{setForm({...form,classe:v});if(SUGG[v])setMats(SUGG[v]);},options:CLASSES,req:true}),
         React.createElement(Sel,{label:"Composition *",value:form.compNum,onChange:v=>setForm({...form,compNum:v}),options:COMPOSITIONS,req:true}),
         React.createElement(Sel,{label:"Année scolaire",value:form.annee,onChange:v=>setForm({...form,annee:v}),options:ANNEES})
@@ -843,48 +925,39 @@ const PageCanevas=({session,toast})=>{
       React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
         React.createElement(Btn,{onClick:sauver,color:"#7c3aed",icon:"💾",disabled:saving},
           saving?"Sauvegarde...":(editId?"Enregistrer les modifications":"Créer le canevas")),
-        editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setMats([{nom:"",coeff:"2",noteMax:"20"}]);}},"Annuler")
+        editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setMats([{nom:"",coeff:"2",noteMax:"20"}]);setForm({classe:"",compNum:"",annee:"2024-2025"});}},"Annuler")
       )
     ),
-    // ── Bouton génération canevas toutes écoles ──
-    isEx&&myCanevas.length>0&&React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdf4,#dcfce7)",border:"2px solid #86efac"}},
-      React.createElement("div",{style:{fontWeight:800,color:"#166534",marginBottom:8}},"🖨️ Générer Canevas de Saisie — Toutes les écoles"),
-      React.createElement("div",{style:{fontSize:"0.82rem",color:"#166534",marginBottom:12}},
-        "Génère un document imprimable avec cases à cocher pour chaque école et chaque canevas."),
-      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
-        React.createElement(Btn,{onClick:()=>imprimerCanevassToutes(),color:"#166534",icon:"🖨️"},"Imprimer canevas toutes écoles"),
-        React.createElement(Btn,{onClick:()=>exporterCanevassExcel(),color:"#059669",icon:"📊",outline:true},"Exporter en Excel")
-      )
-    ),
-    ...myCanevas.map(c=>React.createElement(Card,{key:c.id,style:{padding:14}},
+    // Liste canevas
+    ...tousCanevas.map(c=>React.createElement(Card,{key:c.id,style:{padding:14}},
       React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}},
         React.createElement("div",{style:{flex:1}},
-          React.createElement("div",{style:{fontWeight:800}},ecoleName(c.ecoleId)),
-          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}},
+          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:6}},
             React.createElement(Badge,{color:"#1d4ed8"},c.classe),
             React.createElement(Badge,{color:"#7c3aed"},c.compNum),
-            React.createElement(Badge,{color:"#166534"},c.annee)
+            React.createElement(Badge,{color:"#166534"},c.annee),
+            React.createElement("span",{style:{fontSize:"0.75rem",color:"#6b7280",fontWeight:600}},
+              "→ "+Object.keys(ecoles).length+" école(s)")
           ),
-          React.createElement("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}},
+          React.createElement("div",{style:{display:"flex",gap:5,flexWrap:"wrap"}},
             ...c.matieres.map(m=>React.createElement("span",{key:m.nom,
               style:{background:"#f3f4f6",border:"1px solid #e5e7eb",borderRadius:6,padding:"1px 7px",fontSize:"0.73rem",fontWeight:700,color:"#374151"}},
               m.nom+" ×"+m.coeff+"/"+m.noteMax))
           )
         ),
         React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
-          React.createElement(Btn,{sm:true,outline:true,color:"#166534",onClick:()=>imprimerCanevasUn(c),icon:"🖨️"},"Imprimer"),
-          React.createElement(Btn,{sm:true,outline:true,color:"#7c3aed",onClick:()=>editer(c),icon:"✏️"},"Modifier"),
-          React.createElement(Btn,{sm:true,outline:true,color:"#dc2626",onClick:()=>supprimer(c.id),icon:"🗑️"},"Suppr.")
+          React.createElement(Btn,{sm:true,outline:true,color:"#166534",onClick:()=>imprimerParNiveau(c),icon:"🖨️"},"Imprimer toutes écoles"),
+          isEx&&React.createElement(Btn,{sm:true,outline:true,color:"#7c3aed",onClick:()=>editer(c),icon:"✏️"},"Modifier"),
+          isEx&&React.createElement(Btn,{sm:true,outline:true,color:"#dc2626",onClick:()=>supprimer(c.id),icon:"🗑️"},"Suppr.")
         )
       )
     )),
-    !myCanevas.length&&React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af",fontStyle:"italic"}},"Aucun canevas.")
+    !tousCanevas.length&&React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af",fontStyle:"italic"}},
+      "Aucun canevas. Créez un canevas par niveau (il s\'appliquera à toutes les écoles).")
   );
 };
 
-// ═══════════════════════════════════════════════════
-// PAGE SAISIE
-// ═══════════════════════════════════════════════════
+
 const PageSaisie=({session,toast})=>{
   const isEx=session.type==="examens";
   const [ecoles,setEcoles]=useState({});
@@ -912,8 +985,8 @@ const PageSaisie=({session,toast})=>{
     if(!cnvId) return;
     setLoadingNotes(true);
     Promise.all([
-      DB.getOrCreate("sakassou_elv_"+cnvId,[]),
-      DB.getOrCreate("sakassou_nts_"+cnvId,{})
+      DB.getOrCreate("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),[]),
+      DB.getOrCreate("sakassou_nts_"+cnvId+"_"+(session.ecole?.id||"ex"),{})
     ]).then(([re,rn])=>{
       setEleves(re?.data||[]);
       setNotes(rn?.data||{});
@@ -921,7 +994,7 @@ const PageSaisie=({session,toast})=>{
     });
   },[cnvId]);
 
-  const myCnv=Object.values(allCnv).filter(c=>isEx||c.ecoleId===session.ecole?.id);
+  const myCnv=Object.values(allCnv).filter(c=>isEx||true); // canevas global, toutes écoles
   const cnv=allCnv[cnvId];
   const ecoleName=id=>ecoles[id]?.nom||"?";
 
@@ -930,7 +1003,7 @@ const PageSaisie=({session,toast})=>{
     const e={...newElv,id:"e_"+Date.now(),nom:newElv.nom.trim().toUpperCase(),prenom:newElv.prenom.trim()};
     const nv=[...eleves,e];
     setEleves(nv);
-    await DB.save("sakassou_elv_"+cnvId,nv);
+    await DB.save("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),nv);
     setNewElv({nom:"",prenom:"",sexe:"M",dateNais:""});
     toast("Élève ajouté !");
   };
@@ -938,7 +1011,7 @@ const PageSaisie=({session,toast})=>{
   const suppElv=async id=>{
     const nv=eleves.filter(e=>e.id!==id);
     setEleves(nv);
-    await DB.save("sakassou_elv_"+cnvId,nv);
+    await DB.save("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),nv);
     const nn={...notes};delete nn[id];
     setNotes(nn);
     await DB.save("sakassou_nts_"+cnvId,nn);
@@ -948,7 +1021,7 @@ const PageSaisie=({session,toast})=>{
     const nn={...notes,[eid]:{...(notes[eid]||{}),[mat]:val}};
     setNotes(nn);
     if(saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>{DB.save("sakassou_nts_"+cnvId,nn);},1000);
+    saveTimer.current=setTimeout(()=>{DB.save("sakassou_nts_"+cnvId+"_"+(session.ecole?.id||"ex"),nn);},1000);
   };
 
   const getMoy=eid=>{if(!cnv)return null;const m=calcMoy(notes[eid],cnv.matieres);return m!==null?m.toFixed(2):null;};
@@ -962,13 +1035,13 @@ const PageSaisie=({session,toast})=>{
     ),
     React.createElement(Card,null,
       React.createElement(Sel,{label:"📋 Sélectionner un canevas",value:cnvId,onChange:setCnvId,
-        options:myCnv.map(c=>({v:c.id,l:ecoleName(c.ecoleId)+" — "+c.classe+" — "+c.compNum+" ("+c.annee+")"}))})
+        options:myCnv.map(c=>({v:c.id,l:c.classe+" — "+c.compNum+" ("+c.annee+")"}))})
     ),
     cnvId&&loadingNotes&&React.createElement(Loader,{msg:"Chargement des élèves..."}),
     cnv&&!loadingNotes&&React.createElement(React.Fragment,null,
       React.createElement(Card,{style:{background:"#fffbeb",border:"1px solid #fde68a",padding:12}},
         React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
-          React.createElement(Badge,{color:"#b45309"},ecoleName(cnv.ecoleId)),
+          React.createElement(Badge,{color:"#b45309"},session.type==="ecole"?session.ecole?.nom:"Toutes écoles"),
           React.createElement(Badge,{color:"#1d4ed8"},cnv.classe),
           React.createElement(Badge,{color:"#7c3aed"},cnv.compNum),
           React.createElement(Badge,{color:"#166534"},cnv.annee),
@@ -1066,7 +1139,7 @@ const PageSynthese=({session,toast})=>{
   const generer=async()=>{
     setGenLoading(true);setSynthese(null);
     const myCnv=Object.values(allCnv).filter(c=>{
-      if(!isEx&&c.ecoleId!==session.ecole?.id) return false;
+      // canevas global — pas de filtre par école
       if(f.ecoleId&&c.ecoleId!==f.ecoleId) return false;
       if(f.classe&&c.classe!==f.classe) return false;
       if(f.compNum&&c.compNum!==f.compNum) return false;
@@ -1074,13 +1147,17 @@ const PageSynthese=({session,toast})=>{
       return true;
     });
     if(!myCnv.length){setGenLoading(false);toast("Aucun canevas trouvé","err");return;}
-    const results=await Promise.all(myCnv.map(async c=>{
+    // Chaque canevas × chaque école → une synthèse
+    const allEcoles=isEx?Object.keys(ecoles):[session.ecole?.id].filter(Boolean);
+    const pairs=[];
+    myCnv.forEach(c=>allEcoles.forEach(e_id=>pairs.push({c,e_id})));
+    const results=await Promise.all(pairs.map(async ({c,e_id})=>{
       const [re,rn]=await Promise.all([
-        DB.getOrCreate("sakassou_elv_"+c.id,[]),
-        DB.getOrCreate("sakassou_nts_"+c.id,{})
+        DB.getOrCreate("sakassou_elv_"+c.id+"_"+e_id,[]),
+        DB.getOrCreate("sakassou_nts_"+c.id+"_"+e_id,{})
       ]);
       const syn=calcSynthese(re?.data||[],rn?.data||{},c.matieres);
-      return syn?{...syn,canevas:c,ecoleName:ecoleName(c.ecoleId),directeur:ecoleDir(c.ecoleId)}:null;
+      return syn?{...syn,canevas:c,ecoleName:ecoleName(e_id),directeur:ecoleDir(e_id)}:null;
     }));
     const res=results.filter(Boolean);
     setGenLoading(false);
