@@ -7,6 +7,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
   <style>
     *{box-sizing:border-box;margin:0;padding:0;}
@@ -453,6 +454,8 @@ const PageEcoles=({toast})=>{
   const [editId,setEditId]=useState(null);
   const [loading,setLoading]=useState(true);
   const [saving,setSaving]=useState(false);
+  const [importing,setImporting]=useState(false);
+  const fileRef=useRef(null);
 
   const refresh=async()=>{
     const r=await DB.getOrCreate("sakassou_ecoles",{});
@@ -488,19 +491,101 @@ const PageEcoles=({toast})=>{
 
   const editer=e=>{setForm({nom:e.nom,directeur:e.directeur||"",code:e.code||"",tel:e.tel||""});setEditId(e.id);};
 
+  // ── Télécharger modèle Excel ──
+  const telechargerModele=()=>{
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.aoa_to_sheet([
+      ["NOM_ECOLE","DIRECTEUR","CODE_ECOLE","TEL_DIRECTEUR"],
+      ["EPP Sakassou Centre","KOUAME Amani","CI0100001","0701020304"],
+      ["EPP Sakassou Nord","KOFFI Yao","CI0100002","0702030405"],
+    ]);
+    ws["!cols"]=[{wch:30},{wch:25},{wch:18},{wch:18}];
+    XLSX.utils.book_append_sheet(wb,ws,"Écoles");
+    XLSX.writeFile(wb,"modele_ecoles_sakassou.xlsx");
+    toast("Modèle Excel téléchargé !");
+  };
+
+  // ── Importer depuis Excel ──
+  const importerExcel=async(e)=>{
+    const file=e.target.files[0];
+    if(!file) return;
+    setImporting(true);
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:"array"});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+      // Ignore header row
+      const dataRows=rows.slice(1).filter(r=>r[0]&&r[2]&&r[3]);
+      if(!dataRows.length){setImporting(false);return toast("Aucune donnée valide trouvée","err");}
+      const r=await DB.getOrCreate("sakassou_ecoles",{});
+      const ec={...r?.data||{}};
+      let added=0,skipped=0;
+      dataRows.forEach(row=>{
+        const nom=String(row[0]).trim();
+        const directeur=String(row[1]||"").trim();
+        const code=String(row[2]).trim();
+        const tel=String(row[3]).trim();
+        if(!nom||!code||!tel){skipped++;return;}
+        const doublon=Object.values(ec).find(ex=>ex.code===code);
+        if(doublon){skipped++;return;}
+        const id=`ecole_${Date.now()}_${added}`;
+        ec[id]={id,nom,directeur,code,tel};
+        added++;
+      });
+      const ok=await DB.save("sakassou_ecoles",ec);
+      setImporting(false);
+      if(!ok) return toast("Erreur lors de la sauvegarde","err");
+      setEcoles(ec);
+      toast(`✅ ${added} école(s) importée(s)${skipped?" · "+skipped+" ignorée(s) (doublons/vides)":""}`);
+    }catch(err){
+      setImporting(false);
+      toast("Erreur lecture fichier Excel","err");
+    }
+    e.target.value="";
+  };
+
+  // ── Export liste écoles Excel ──
+  const exporterExcel=()=>{
+    const wb=XLSX.utils.book_new();
+    const rows=[["NOM_ECOLE","DIRECTEUR","CODE_ECOLE","TEL_DIRECTEUR"]];
+    Object.values(ecoles).forEach(e=>rows.push([e.nom,e.directeur||"",e.code,e.tel]));
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"]=[{wch:30},{wch:25},{wch:18},{wch:18}];
+    XLSX.utils.book_append_sheet(wb,ws,"Écoles");
+    XLSX.writeFile(wb,"ecoles_sakassou_"+new Date().toISOString().slice(0,10)+".xlsx");
+    toast("Liste exportée en Excel !");
+  };
+
   if(loading) return React.createElement(Loader,{msg:"Chargement des écoles..."});
 
   return React.createElement("div",{style:{maxWidth:720,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
     React.createElement("div",{style:{background:"linear-gradient(135deg,#1d4ed8,#2563eb)",borderRadius:18,padding:22,color:"white"}},
       React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"🏫 Gestion des Écoles"),
       React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},
-        Object.keys(ecoles).length+" école(s) · Code + Tél = identifiants de connexion")
+        Object.keys(ecoles).length+" école(s) enregistrée(s) · Code + Tél = identifiants de connexion")
     ),
-    React.createElement("div",{style:{background:"#eff6ff",border:"2px solid #bfdbfe",borderRadius:12,padding:"12px 16px",fontSize:"0.82rem",color:"#1e40af",fontWeight:600}},
-      "ℹ️ Les écoles enregistrées ici peuvent se connecter et saisir leurs notes. Examens & Concours voit toutes les données."
-    ),
+    // Bloc import Excel
     React.createElement(Card,null,
-      React.createElement("div",{style:{fontWeight:800,color:"#1d4ed8",marginBottom:12}},editId?"✏️ Modifier":"➕ Nouvelle école"),
+      React.createElement("div",{style:{fontWeight:800,color:"#1d4ed8",marginBottom:10}},"📥 Import / Export Excel"),
+      React.createElement("div",{style:{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 14px",fontSize:"0.8rem",color:"#1e40af",fontWeight:600,marginBottom:12}},
+        "Format Excel attendu : 4 colonnes → NOM_ECOLE · DIRECTEUR · CODE_ECOLE · TEL_DIRECTEUR"
+      ),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:telechargerModele,color:"#0891b2",icon:"📄",sm:true},"Télécharger modèle"),
+        React.createElement("label",{style:{display:"inline-flex",alignItems:"center",gap:5,background:"#166534",color:"white",
+          border:"2px solid #166534",borderRadius:9,padding:"5px 12px",fontWeight:700,fontSize:"0.76rem",cursor:"pointer"}},
+          React.createElement("span",null,"📂"),
+          importing?"Importation...":"Importer fichier Excel",
+          React.createElement("input",{type:"file",accept:".xlsx,.xls,.csv",ref:fileRef,
+            onChange:importerExcel,style:{display:"none"}})
+        ),
+        Object.keys(ecoles).length>0&&React.createElement(Btn,{onClick:exporterExcel,color:"#7c3aed",icon:"📊",sm:true},"Exporter liste Excel")
+      )
+    ),
+    // Formulaire manuel
+    React.createElement(Card,null,
+      React.createElement("div",{style:{fontWeight:800,color:"#1d4ed8",marginBottom:12}},editId?"✏️ Modifier":"➕ Ajouter une école manuellement"),
       React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
         React.createElement(Inp,{label:"Nom de l'école *",value:form.nom,onChange:v=>setForm({...form,nom:v}),placeholder:"Ex: EPP Sakassou Centre"}),
         React.createElement(Inp,{label:"Directeur / Directrice",value:form.directeur,onChange:v=>setForm({...form,directeur:v}),placeholder:"Nom complet"}),
@@ -513,8 +598,10 @@ const PageEcoles=({toast})=>{
         editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setForm({nom:"",directeur:"",code:"",tel:""});}},"Annuler")
       )
     ),
-    ...Object.values(ecoles).map(e=>
+    // Liste écoles
+    ...Object.values(ecoles).map((e,idx)=>
       React.createElement(Card,{key:e.id,style:{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",padding:14}},
+        React.createElement("div",{style:{width:32,height:32,borderRadius:"50%",background:"#dbeafe",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,color:"#1d4ed8",fontSize:"0.85rem",flexShrink:0}},idx+1),
         React.createElement("div",{style:{flex:1}},
           React.createElement("div",{style:{fontWeight:800}},e.nom),
           React.createElement("div",{style:{color:"#6b7280",fontSize:"0.8rem",marginTop:3}},
@@ -525,7 +612,7 @@ const PageEcoles=({toast})=>{
       )
     ),
     !Object.keys(ecoles).length&&React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af",fontStyle:"italic"}},
-      "Aucune école. Commencez par en ajouter une.")
+      "Aucune école. Importez un fichier Excel ou ajoutez manuellement.")
   );
 };
 
@@ -599,6 +686,125 @@ const PageCanevas=({session,toast})=>{
   const updMat=(i,k,v)=>{const nm=[...mats];nm[i]={...nm[i],[k]:v};setMats(nm);};
   const myCanevas=Object.values(canevas).filter(c=>isEx||c.ecoleId===session.ecole?.id);
 
+  // ── Impression canevas UN seul ──
+  const imprimerCanevasUn=(c)=>{
+    const cfg2={}; // on utilise le nom d'école
+    const eName=ecoleName(c.ecoleId);
+    const nbLignes=30;
+    let html2=`
+<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/>
+<title>Canevas ${eName} - ${c.classe} - ${c.compNum}</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:20px;font-size:11px;}
+  h2{text-align:center;font-size:13px;margin:4px 0;}
+  h3{text-align:center;font-size:11px;font-weight:normal;margin:2px 0 10px;}
+  table{width:100%;border-collapse:collapse;margin-top:8px;}
+  th{background:#166534;color:white;padding:5px 4px;text-align:center;font-size:10px;border:1px solid #ccc;}
+  td{border:1px solid #ccc;padding:4px;text-align:center;font-size:10px;}
+  td.nom{text-align:left;min-width:140px;}
+  .check-cell{width:28px;}
+  .sig{margin-top:30px;display:flex;justify-content:space-between;}
+  @media print{body{margin:10px;}}
+</style></head><body>
+<h2>INSPECTION DE L'ENSEIGNEMENT PRIMAIRE ET PRÉSCOLAIRE</h2>
+<h2>CANEVAS DE SAISIE DES NOTES — ${c.compNum.toUpperCase()} · ${c.annee}</h2>
+<h3>École : <strong>${eName}</strong> &nbsp;|&nbsp; Classe : <strong>${c.classe}</strong></h3>
+<table>
+<thead><tr>
+  <th style="width:30px">N°</th>
+  <th class="nom" style="text-align:left">NOM & PRÉNOMS</th>
+  <th style="width:22px">Sx</th>`;
+    c.matieres.forEach(m=>{html2+=`<th>${m.nom}<br/><span style="font-size:9px">/${m.noteMax} ×${m.coeff}</span></th>`;});
+    html2+=`<th style="background:#ca8a04">MOY/20</th>
+  <th style="width:28px;background:#dc2626">✓</th>
+</tr></thead><tbody>`;
+    for(let i=1;i<=nbLignes;i++){
+      html2+=`<tr><td>${i}</td><td class="nom">&nbsp;</td><td>&nbsp;</td>`;
+      c.matieres.forEach(()=>{html2+=`<td>&nbsp;</td>`;});
+      html2+=`<td>&nbsp;</td><td class="check-cell"><input type="checkbox"/></td></tr>`;
+    }
+    html2+=`</tbody></table>
+<div style="margin-top:8px;font-size:10px;color:#666">Nombre d'élèves : _____ &nbsp;&nbsp; Admis : _____ &nbsp;&nbsp; Taux : _____%</div>
+<div class="sig">
+  <div>Le Directeur(trice)<br/><br/><br/>____________________</div>
+  <div>Visa Inspecteur<br/><br/><br/>____________________</div>
+</div>
+</body></html>`;
+    const w=window.open("","_blank","width=900,height=700");
+    w.document.write(html2);w.document.close();
+    setTimeout(()=>w.print(),500);
+  };
+
+  // ── Impression canevas TOUTES écoles ──
+  const imprimerCanevassToutes=()=>{
+    if(!myCanevas.length) return;
+    const nbLignes=30;
+    let html2=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/><title>Canevas Toutes Écoles</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:15px;font-size:10px;}
+  h1{text-align:center;font-size:13px;margin:4px 0;}
+  h2{text-align:center;font-size:11px;margin:2px 0 6px;}
+  h3{text-align:center;font-size:10px;font-weight:normal;margin:2px 0 8px;}
+  table{width:100%;border-collapse:collapse;margin-top:6px;}
+  th{background:#166534;color:white;padding:4px 3px;text-align:center;font-size:9px;border:1px solid #999;}
+  td{border:1px solid #ccc;padding:3px 2px;text-align:center;font-size:9px;height:18px;}
+  td.nom{text-align:left;min-width:130px;}
+  .page-break{page-break-after:always;margin-bottom:20px;}
+  .stats{margin-top:6px;font-size:9px;color:#555;}
+  .sig{margin-top:20px;display:flex;justify-content:space-between;font-size:9px;}
+  @media print{.page-break{page-break-after:always;} body{margin:8px;}}
+</style></head><body>`;
+    myCanevas.forEach((c,idx)=>{
+      const eName=ecoleName(c.ecoleId);
+      const isLast=idx===myCanevas.length-1;
+      html2+=`<div class="${isLast?"":"page-break"}">
+<h1>INSPECTION DE L'ENSEIGNEMENT PRIMAIRE ET PRÉSCOLAIRE DE SAKASSOU</h1>
+<h2>CANEVAS DE SAISIE — ${c.compNum.toUpperCase()} · ${c.annee}</h2>
+<h3>École : <strong>${eName}</strong> &nbsp;|&nbsp; Classe : <strong>${c.classe}</strong></h3>
+<table><thead><tr>
+  <th style="width:25px">N°</th>
+  <th style="text-align:left;min-width:130px">NOM & PRÉNOMS</th>
+  <th style="width:18px">Sx</th>`;
+      c.matieres.forEach(m=>{html2+=`<th>${m.nom}<br/><span style="font-size:8px">/${m.noteMax}×${m.coeff}</span></th>`;});
+      html2+=`<th style="background:#ca8a04;font-weight:900">MOY</th>
+  <th style="width:24px;background:#15803d">✓</th>
+</tr></thead><tbody>`;
+      for(let i=1;i<=nbLignes;i++){
+        html2+=`<tr><td>${i}</td><td class="nom">&nbsp;</td><td>&nbsp;</td>`;
+        c.matieres.forEach(()=>{html2+=`<td>&nbsp;</td>`;});
+        html2+=`<td>&nbsp;</td><td><input type="checkbox"/></td></tr>`;
+      }
+      html2+=`</tbody></table>
+<div class="stats">Effectif : _______ &nbsp;|&nbsp; Admis : _______ &nbsp;|&nbsp; Filles : _______ &nbsp;|&nbsp; Taux : _______% &nbsp;|&nbsp; Moy. Classe : _______/20</div>
+<div class="sig">
+  <div>Le Directeur(trice) : ____________________</div>
+  <div>Date : ____________________</div>
+  <div>Visa Inspecteur : ____________________</div>
+</div></div>`;
+    });
+    html2+=`</body></html>`;
+    const w=window.open("","_blank","width=1000,height=750");
+    w.document.write(html2);w.document.close();
+    setTimeout(()=>w.print(),600);
+  };
+
+  // ── Export Excel canevas ──
+  const exporterCanevassExcel=()=>{
+    const wb=XLSX.utils.book_new();
+    myCanevas.forEach(c=>{
+      const eName=ecoleName(c.ecoleId).substring(0,20);
+      const sheetName=(eName+"-"+c.classe).substring(0,28);
+      const header=["N°","NOM & PRÉNOMS","Sexe",...c.matieres.map(m=>m.nom+" /"+m.noteMax+" ×"+m.coeff),"MOY/20","✓ Saisi"];
+      const rows=[header];
+      for(let i=1;i<=30;i++) rows.push([i,"","","","",""]);
+      const ws=XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"]=[{wch:4},{wch:28},{wch:5},...c.matieres.map(()=>({wch:12})),{wch:8},{wch:6}];
+      XLSX.utils.book_append_sheet(wb,ws,sheetName);
+    });
+    XLSX.writeFile(wb,"canevas_toutes_ecoles_"+new Date().toISOString().slice(0,10)+".xlsx");
+    toast("Canevas exportés en Excel !");
+  };
+
   if(loading) return React.createElement(Loader,{msg:"Chargement des canevas..."});
 
   return React.createElement("div",{style:{maxWidth:780,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
@@ -640,6 +846,16 @@ const PageCanevas=({session,toast})=>{
         editId&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>{setEditId(null);setMats([{nom:"",coeff:"2",noteMax:"20"}]);}},"Annuler")
       )
     ),
+    // ── Bouton génération canevas toutes écoles ──
+    isEx&&myCanevas.length>0&&React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdf4,#dcfce7)",border:"2px solid #86efac"}},
+      React.createElement("div",{style:{fontWeight:800,color:"#166534",marginBottom:8}},"🖨️ Générer Canevas de Saisie — Toutes les écoles"),
+      React.createElement("div",{style:{fontSize:"0.82rem",color:"#166534",marginBottom:12}},
+        "Génère un document imprimable avec cases à cocher pour chaque école et chaque canevas."),
+      React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+        React.createElement(Btn,{onClick:()=>imprimerCanevassToutes(),color:"#166534",icon:"🖨️"},"Imprimer canevas toutes écoles"),
+        React.createElement(Btn,{onClick:()=>exporterCanevassExcel(),color:"#059669",icon:"📊",outline:true},"Exporter en Excel")
+      )
+    ),
     ...myCanevas.map(c=>React.createElement(Card,{key:c.id,style:{padding:14}},
       React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}},
         React.createElement("div",{style:{flex:1}},
@@ -655,7 +871,8 @@ const PageCanevas=({session,toast})=>{
               m.nom+" ×"+m.coeff+"/"+m.noteMax))
           )
         ),
-        React.createElement("div",{style:{display:"flex",gap:6}},
+        React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+          React.createElement(Btn,{sm:true,outline:true,color:"#166534",onClick:()=>imprimerCanevasUn(c),icon:"🖨️"},"Imprimer"),
           React.createElement(Btn,{sm:true,outline:true,color:"#7c3aed",onClick:()=>editer(c),icon:"✏️"},"Modifier"),
           React.createElement(Btn,{sm:true,outline:true,color:"#dc2626",onClick:()=>supprimer(c.id),icon:"🗑️"},"Suppr.")
         )
