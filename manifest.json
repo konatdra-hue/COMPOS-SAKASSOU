@@ -2,13 +2,28 @@
   "name": "COMPOS SAKASSOU",
   "short_name": "COMPOS",
   "description": "Gestion des Résultats des Compositions Scolaires - IEPP Sakassou",
-  "start_url": "/",
+  "start_url": "/index.html",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#14532d",
   "theme_color": "#166534",
   "orientation": "portrait-primary",
+  "lang": "fr",
+  "categories": ["education", "productivity"],
   "icons": [
-    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
-    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"}
-  ]
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "prefer_related_applications": false
 }
