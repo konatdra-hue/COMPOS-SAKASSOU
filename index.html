@@ -905,7 +905,8 @@ const PageCanevas=({session,toast})=>{
 <table>
 <thead><tr>
   <th style="width:22px">N°</th>
-  <th class="left" style="min-width:120px">NOM & PRÉNOMS</th>
+  <th style="width:90px">MATRICULE</th>
+  <th class="left" style="min-width:110px">NOM & PRÉNOMS</th>
   <th style="width:16px">Sx</th>`;
       c.matieres.forEach(m=>{
         doc+=`<th>${m.nom}<br/><span style="font-size:8px">/${m.noteMax}×${m.coeff}</span></th>`;
@@ -915,7 +916,7 @@ const PageCanevas=({session,toast})=>{
 </tr></thead><tbody>`;
       for(let i=1;i<=nbLignes;i++){
         const bg=i%2===0?"#f9fafb":"white";
-        doc+=`<tr style="background:${bg}"><td>${i}</td><td class="nom"></td><td></td>`;
+        doc+=`<tr style="background:${bg}"><td>${i}</td><td></td><td class="nom"></td><td></td>`;
         c.matieres.forEach(()=>{doc+=`<td></td>`;});
         doc+=`<td></td><td style="text-align:center"><input type="checkbox"/></td></tr>`;
       }
@@ -993,7 +994,7 @@ const PageCanevas=({session,toast})=>{
 </tr></thead><tbody>`;
         for(let i=1;i<=nbLignes;i++){
           const bg=i%2===0?"#f9fafb":"white";
-          doc+=`<tr style="background:${bg}"><td>${i}</td><td class="nom"></td><td></td>`;
+          doc+=`<tr style="background:${bg}"><td>${i}</td><td></td><td class="nom"></td><td></td>`;
           c.matieres.forEach(()=>{doc+=`<td></td>`;});
           doc+=`<td></td><td><input type="checkbox"/></td></tr>`;
         }
@@ -1131,10 +1132,13 @@ const PageSaisie=({session,toast})=>{
   const [cnvId,setCnvId]=useState("");
   const [eleves,setEleves]=useState([]);
   const [notes,setNotes]=useState({});
-  const [newElv,setNewElv]=useState({nom:"",prenom:"",sexe:"M",dateNais:""});
+  const [newElv,setNewElv]=useState({matricule:"",nom:"",prenom:"",sexe:"M",dateNais:""});
   const [loading,setLoading]=useState(true);
   const [loadingNotes,setLoadingNotes]=useState(false);
+  const [importing,setImporting]=useState(false);
   const saveTimer=useRef(null);
+  const fileRef=useRef(null);
+  const ecoleKey=session.ecole?.id||"ex";
 
   useEffect(()=>{
     Promise.all([
@@ -1151,8 +1155,8 @@ const PageSaisie=({session,toast})=>{
     if(!cnvId) return;
     setLoadingNotes(true);
     Promise.all([
-      DB.getOrCreate("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),[]),
-      DB.getOrCreate("sakassou_nts_"+cnvId+"_"+(session.ecole?.id||"ex"),{})
+      DB.getOrCreate("sakassou_elv_"+cnvId+"_"+ecoleKey,[]),
+      DB.getOrCreate("sakassou_nts_"+cnvId+"_"+ecoleKey,{})
     ]).then(([re,rn])=>{
       setEleves(re?.data||[]);
       setNotes(rn?.data||{});
@@ -1160,72 +1164,207 @@ const PageSaisie=({session,toast})=>{
     });
   },[cnvId]);
 
-  const myCnv=Object.values(allCnv).filter(c=>isEx||true); // canevas global, toutes écoles
+  const myCnv=Object.values(allCnv).sort((a,b)=>
+    CLASSES.indexOf(a.classe)-CLASSES.indexOf(b.classe)||
+    COMPOSITIONS.indexOf(a.compNum)-COMPOSITIONS.indexOf(b.compNum)
+  );
   const cnv=allCnv[cnvId];
   const ecoleName=id=>ecoles[id]?.nom||"?";
+  const elvKey=()=>"sakassou_elv_"+cnvId+"_"+ecoleKey;
+  const ntsKey=()=>"sakassou_nts_"+cnvId+"_"+ecoleKey;
 
+  // ── Ajouter élève manuellement ──
   const ajouterElv=async()=>{
     if(!newElv.nom.trim()) return toast("Le NOM est obligatoire","err");
-    const e={...newElv,id:"e_"+Date.now(),nom:newElv.nom.trim().toUpperCase(),prenom:newElv.prenom.trim()};
+    const e={
+      ...newElv,
+      id:"e_"+Date.now(),
+      matricule:newElv.matricule.trim(),
+      nom:newElv.nom.trim().toUpperCase(),
+      prenom:newElv.prenom.trim()
+    };
     const nv=[...eleves,e];
     setEleves(nv);
-    await DB.save("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),nv);
-    setNewElv({nom:"",prenom:"",sexe:"M",dateNais:""});
+    await DB.save(elvKey(),nv);
+    setNewElv({matricule:"",nom:"",prenom:"",sexe:"M",dateNais:""});
     toast("Élève ajouté !");
   };
 
+  // ── Supprimer élève ──
   const suppElv=async id=>{
     const nv=eleves.filter(e=>e.id!==id);
     setEleves(nv);
-    await DB.save("sakassou_elv_"+cnvId+"_"+(session.ecole?.id||"ex"),nv);
+    await DB.save(elvKey(),nv);
     const nn={...notes};delete nn[id];
     setNotes(nn);
-    await DB.save("sakassou_nts_"+cnvId,nn);
+    await DB.save(ntsKey(),nn);
   };
 
+  // ── Saisie note ──
   const setNote=(eid,mat,val)=>{
     const nn={...notes,[eid]:{...(notes[eid]||{}),[mat]:val}};
     setNotes(nn);
     if(saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>{DB.save("sakassou_nts_"+cnvId+"_"+(session.ecole?.id||"ex"),nn);},1000);
+    saveTimer.current=setTimeout(()=>DB.save(ntsKey(),nn),1000);
   };
 
-  const getMoy=eid=>{if(!cnv)return null;const m=calcMoy(notes[eid],cnv.matieres);return m!==null?m.toFixed(2):null;};
+  const getMoy=eid=>{
+    if(!cnv) return null;
+    const m=calcMoy(notes[eid],cnv.matieres);
+    return m!==null?m.toFixed(2):null;
+  };
+
+  // ── Télécharger modèle Excel élèves ──
+  const telechargerModele=()=>{
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.aoa_to_sheet([
+      ["MATRICULE","NOM","PRENOMS","SEXE","DATE_NAISSANCE"],
+      ["CI2024001","KONAN","Aya Marie","F","2015-03-15"],
+      ["CI2024002","KOUAME","Koffi Jean","M","2014-07-22"],
+    ]);
+    ws["!cols"]=[{wch:14},{wch:22},{wch:22},{wch:6},{wch:16}];
+    XLSX.utils.book_append_sheet(wb,ws,"Élèves");
+    XLSX.writeFile(wb,"modele_eleves.xlsx");
+    toast("Modèle téléchargé !");
+  };
+
+  // ── Importer élèves depuis Excel ──
+  const importerEleves=async(e)=>{
+    const file=e.target.files[0];
+    if(!file||!cnvId) return;
+    setImporting(true);
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:"array"});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+      const dataRows=rows.slice(1).filter(r=>r[1]); // NOM obligatoire (col B)
+      if(!dataRows.length){setImporting(false);return toast("Aucune donnée valide","err");}
+      const existing=new Set(eleves.map(e=>e.matricule).filter(Boolean));
+      let added=0,skipped=0;
+      const nv=[...eleves];
+      dataRows.forEach((row,idx)=>{
+        const matricule=String(row[0]||"").trim();
+        const nom=String(row[1]||"").trim().toUpperCase();
+        const prenom=String(row[2]||"").trim();
+        const sexe=String(row[3]||"M").trim().toUpperCase()==="F"?"F":"M";
+        const dateNais=String(row[4]||"").trim();
+        if(!nom){skipped++;return;}
+        // Vérifier doublon par matricule
+        if(matricule&&existing.has(matricule)){skipped++;return;}
+        if(matricule) existing.add(matricule);
+        nv.push({id:"e_"+(Date.now()+idx),matricule,nom,prenom,sexe,dateNais});
+        added++;
+      });
+      await DB.save(elvKey(),nv);
+      setEleves(nv);
+      setImporting(false);
+      toast(`✅ ${added} élève(s) importé(s)${skipped?" · "+skipped+" ignoré(s)":""}`);
+    }catch(err){
+      setImporting(false);
+      toast("Erreur lecture fichier","err");
+    }
+    e.target.value="";
+  };
+
+  // ── Exporter élèves + notes Excel ──
+  const exporterEleves=()=>{
+    if(!eleves.length) return toast("Aucun élève à exporter","err");
+    const wb=XLSX.utils.book_new();
+    // Feuille liste élèves
+    const header1=["Matricule","NOM","Prénoms","Sexe","Date Naissance"];
+    const rows1=[header1,...eleves.map(e=>[e.matricule||"",e.nom,e.prenom,e.sexe,e.dateNais||""])];
+    const ws1=XLSX.utils.aoa_to_sheet(rows1);
+    ws1["!cols"]=[{wch:14},{wch:22},{wch:22},{wch:6},{wch:14}];
+    XLSX.utils.book_append_sheet(wb,ws1,"Élèves");
+    // Feuille notes
+    if(cnv){
+      const header2=["Matricule","NOM","Prénoms","Sexe",...cnv.matieres.map(m=>m.nom+" /"+m.noteMax),"Moyenne/20","Mention","Décision"];
+      const rows2=[header2];
+      // Trier par moyenne décroissante
+      const sorted=[...eleves].map(e=>({...e,moy:calcMoy(notes[e.id],cnv.matieres)}))
+        .sort((a,b)=>(b.moy||0)-(a.moy||0));
+      sorted.forEach(e=>{
+        const moy=e.moy;
+        const moyStr=moy!==null?moy.toFixed(2):"";
+        const mention=moy!==null?getMention(moy).label:"";
+        const decision=moy!==null?(moy>=10?"Admis(e)":"Redoublant(e)"):"";
+        rows2.push([
+          e.matricule||"",e.nom,e.prenom,e.sexe,
+          ...cnv.matieres.map(m=>notes[e.id]?.[m.nom]||""),
+          moyStr,mention,decision
+        ]);
+      });
+      const ws2=XLSX.utils.aoa_to_sheet(rows2);
+      ws2["!cols"]=[{wch:14},{wch:22},{wch:22},{wch:6},...cnv.matieres.map(()=>({wch:10})),{wch:10},{wch:14},{wch:14}];
+      XLSX.utils.book_append_sheet(wb,ws2,"Notes & Résultats");
+    }
+    const nom=session.ecole?.nom||"export";
+    XLSX.writeFile(wb,"eleves_"+nom.replace(/\s/g,"_")+"_"+(cnv?.classe||"")+"_"+new Date().toISOString().slice(0,10)+".xlsx");
+    toast("Export Excel réussi !");
+  };
 
   if(loading) return React.createElement(Loader,{msg:"Chargement..."});
 
-  return React.createElement("div",{style:{maxWidth:1000,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+  return React.createElement("div",{style:{maxWidth:1100,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+    // En-tête
     React.createElement("div",{style:{background:"linear-gradient(135deg,#b45309,#d97706)",borderRadius:18,padding:22,color:"white"}},
       React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"✏️ Saisie des Notes"),
       React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Notes synchronisées · Visibles par Examens & Concours")
     ),
+    // Sélection canevas
     React.createElement(Card,null,
       React.createElement(Sel,{label:"📋 Sélectionner un canevas",value:cnvId,onChange:setCnvId,
-        options:myCnv.map(c=>({v:c.id,l:c.classe+" — "+c.compNum+" ("+c.annee+")"}))})
+        options:myCnv.map(c=>({v:c.id,l:c.classe+" — "+c.compNum+" ("+c.annee+")"}))}),
+      cnvId&&React.createElement("div",{style:{marginTop:10,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
+        React.createElement(Badge,{color:"#b45309"},session.type==="ecole"?session.ecole?.nom:"Toutes écoles"),
+        cnv&&React.createElement(Badge,{color:"#1d4ed8"},cnv?.classe),
+        cnv&&React.createElement(Badge,{color:"#7c3aed"},cnv?.compNum),
+        cnv&&React.createElement(Badge,{color:"#166534"},cnv?.annee),
+        React.createElement("span",{style:{fontSize:"0.72rem",color:"#92400e",fontWeight:600}},"🔄 Sync auto")
+      )
     ),
     cnvId&&loadingNotes&&React.createElement(Loader,{msg:"Chargement des élèves..."}),
     cnv&&!loadingNotes&&React.createElement(React.Fragment,null,
-      React.createElement(Card,{style:{background:"#fffbeb",border:"1px solid #fde68a",padding:12}},
-        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
-          React.createElement(Badge,{color:"#b45309"},session.type==="ecole"?session.ecole?.nom:"Toutes écoles"),
-          React.createElement(Badge,{color:"#1d4ed8"},cnv.classe),
-          React.createElement(Badge,{color:"#7c3aed"},cnv.compNum),
-          React.createElement(Badge,{color:"#166534"},cnv.annee),
-          React.createElement("span",{style:{fontSize:"0.72rem",color:"#92400e",fontWeight:600}},"🔄 Sync auto")
+
+      // ── Import / Export Excel ──
+      React.createElement(Card,null,
+        React.createElement("div",{style:{fontWeight:800,color:"#b45309",marginBottom:10}},"📥 Import / Export Élèves"),
+        React.createElement("div",{style:{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"8px 12px",fontSize:"0.8rem",color:"#92400e",fontWeight:600,marginBottom:10}},
+          "Format Excel : MATRICULE · NOM · PRENOMS · SEXE (M/F) · DATE_NAISSANCE (AAAA-MM-JJ)"
+        ),
+        React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+          React.createElement(Btn,{onClick:telechargerModele,color:"#0891b2",icon:"📄",sm:true},"Modèle Excel"),
+          React.createElement("label",{style:{display:"inline-flex",alignItems:"center",gap:5,
+            background:"#166534",color:"white",border:"2px solid #166534",borderRadius:9,
+            padding:"5px 12px",fontWeight:700,fontSize:"0.76rem",cursor:"pointer"}},
+            React.createElement("span",null,"📂"),
+            importing?"Importation...":"Importer Excel",
+            React.createElement("input",{type:"file",accept:".xlsx,.xls,.csv",ref:fileRef,
+              onChange:importerEleves,style:{display:"none"}})
+          ),
+          eleves.length>0&&React.createElement(Btn,{onClick:exporterEleves,color:"#7c3aed",icon:"📊",sm:true},"Exporter Excel")
         )
       ),
+
+      // ── Ajout manuel ──
       React.createElement(Card,null,
-        React.createElement("div",{style:{fontWeight:800,color:"#b45309",marginBottom:10}},"➕ Ajouter un élève"),
-        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr",gap:8}},
+        React.createElement("div",{style:{fontWeight:800,color:"#b45309",marginBottom:10}},"➕ Ajouter un élève manuellement"),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 2fr 2fr 1fr 1fr",gap:8}},
+          React.createElement(Inp,{label:"Matricule",value:newElv.matricule,onChange:v=>setNewElv({...newElv,matricule:v}),placeholder:"Ex: CI2024001"}),
           React.createElement(Inp,{label:"NOM *",value:newElv.nom,onChange:v=>setNewElv({...newElv,nom:v}),placeholder:"NOM DE FAMILLE"}),
           React.createElement(Inp,{label:"Prénoms",value:newElv.prenom,onChange:v=>setNewElv({...newElv,prenom:v}),placeholder:"Prénoms"}),
           React.createElement(Sel,{label:"Sexe",value:newElv.sexe,onChange:v=>setNewElv({...newElv,sexe:v}),options:["M","F"]}),
           React.createElement(Inp,{label:"Date nais.",type:"date",value:newElv.dateNais,onChange:v=>setNewElv({...newElv,dateNais:v})})
         ),
-        React.createElement("div",{style:{marginTop:10}},React.createElement(Btn,{onClick:ajouterElv,color:"#b45309",icon:"➕"},"Ajouter l'élève"))
+        React.createElement("div",{style:{marginTop:10}},
+          React.createElement(Btn,{onClick:ajouterElv,color:"#b45309",icon:"➕"},"Ajouter l'élève"))
       ),
-      eleves.length>0&&React.createElement(Card,{style:{padding:0,overflow:"auto"}},
-        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",color:"white",fontWeight:800,display:"flex",justifyContent:"space-between",alignItems:"center"}},
+
+      // ── Tableau élèves + notes ──
+      eleves.length>0&&React.createElement(Card,{style:{padding:0,overflow:"hidden"}},
+        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",
+          color:"white",fontWeight:800,display:"flex",justifyContent:"space-between",alignItems:"center"}},
           React.createElement("span",null,"👥 "+eleves.length+" élève(s)"),
           React.createElement("span",{style:{fontSize:"0.78rem",opacity:0.85}},"🔄 Sync auto")
         ),
@@ -1233,35 +1372,61 @@ const PageSaisie=({session,toast})=>{
           React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
             React.createElement("thead",null,
               React.createElement("tr",{style:{background:"#f8fafc"}},
-                React.createElement("th",{style:{padding:"8px 10px",textAlign:"left",borderBottom:"2px solid #e5e7eb",minWidth:150,position:"sticky",left:0,background:"#f8fafc"}},"Élève"),
+                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
+                  minWidth:90,color:"#0891b2",fontWeight:800,position:"sticky",left:0,background:"#f8fafc",zIndex:2}},
+                  "Matricule"),
+                React.createElement("th",{style:{padding:"8px 10px",textAlign:"left",borderBottom:"2px solid #e5e7eb",
+                  minWidth:160,position:"sticky",left:90,background:"#f8fafc",zIndex:2}},"NOM & Prénoms"),
                 React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center"}},"Sx"),
-                ...cnv.matieres.map(m=>React.createElement("th",{key:m.nom,style:{padding:"6px 8px",borderBottom:"2px solid #e5e7eb",textAlign:"center",minWidth:85,color:"#7c3aed",fontWeight:800}},
-                  m.nom,React.createElement("br"),React.createElement("span",{style:{color:"#9ca3af",fontWeight:600,fontSize:"0.68rem"}},"/"+m.noteMax+" ×"+m.coeff)
+                ...cnv.matieres.map(m=>React.createElement("th",{key:m.nom,
+                  style:{padding:"6px 8px",borderBottom:"2px solid #e5e7eb",textAlign:"center",minWidth:82,color:"#7c3aed",fontWeight:800}},
+                  m.nom,React.createElement("br"),
+                  React.createElement("span",{style:{color:"#9ca3af",fontWeight:600,fontSize:"0.68rem"}},"/"+m.noteMax+" ×"+m.coeff)
                 )),
-                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",minWidth:75,background:"#f0fdf4",color:"#166534",fontWeight:900}},"Moy/20"),
+                React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
+                  minWidth:72,background:"#f0fdf4",color:"#166534",fontWeight:900}},"Moy/20"),
                 React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",width:36}})
               )
             ),
             React.createElement("tbody",null,
               ...eleves.map((e,i)=>{
-                const moy=getMoy(e.id);const mt=moy?getMention(moy):null;
-                return React.createElement("tr",{key:e.id,style:{background:i%2===0?"white":"#fafafa",borderBottom:"1px solid #f1f5f9"}},
-                  React.createElement("td",{style:{padding:"5px 10px",fontWeight:700,position:"sticky",left:0,background:i%2===0?"white":"#fafafa",borderRight:"1px solid #e5e7eb"}},
-                    e.nom,React.createElement("br"),React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},e.prenom)
+                const moy=getMoy(e.id);
+                const mt=moy?getMention(moy):null;
+                const bg=i%2===0?"white":"#fafafa";
+                return React.createElement("tr",{key:e.id,style:{background:bg,borderBottom:"1px solid #f1f5f9"}},
+                  // Matricule
+                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",fontWeight:700,color:"#0891b2",
+                    fontSize:"0.75rem",position:"sticky",left:0,background:bg,borderRight:"1px solid #e5e7eb",zIndex:1}},
+                    e.matricule||React.createElement("span",{style:{color:"#d1d5db"}},"—")),
+                  // Nom & Prénoms
+                  React.createElement("td",{style:{padding:"5px 10px",fontWeight:700,
+                    position:"sticky",left:90,background:bg,borderRight:"1px solid #e5e7eb",zIndex:1}},
+                    e.nom,
+                    React.createElement("br"),
+                    React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},e.prenom)
                   ),
-                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",color:e.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},e.sexe),
+                  // Sexe
+                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",
+                    color:e.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},e.sexe),
+                  // Notes
                   ...cnv.matieres.map(m=>React.createElement("td",{key:m.nom,style:{padding:"3px 5px",textAlign:"center"}},
                     React.createElement("input",{type:"number",min:"0",max:m.noteMax,step:"0.25",
                       value:notes[e.id]?.[m.nom]??"",
                       onChange:ev=>setNote(e.id,m.nom,ev.target.value),
-                      style:{width:66,border:"1.5px solid #e5e7eb",borderRadius:6,padding:"4px 5px",textAlign:"center",fontSize:"0.85rem",outline:"none",fontFamily:"inherit"},
+                      style:{width:64,border:"1.5px solid #e5e7eb",borderRadius:6,padding:"4px 5px",
+                        textAlign:"center",fontSize:"0.85rem",outline:"none",fontFamily:"inherit"},
                       onFocus:ev=>{ev.target.style.borderColor="#d97706";ev.target.style.background="#fffbeb";},
                       onBlur:ev=>{ev.target.style.borderColor="#e5e7eb";ev.target.style.background="white";}
                     })
                   )),
-                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",background:"#f0fdf4",fontWeight:900,color:mt?.color||"#9ca3af"}},moy||"—"),
+                  // Moyenne
+                  React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",background:"#f0fdf4",
+                    fontWeight:900,color:mt?.color||"#9ca3af"}},moy||"—"),
+                  // Supprimer
                   React.createElement("td",{style:{padding:"3px 5px",textAlign:"center"}},
-                    React.createElement("button",{onClick:()=>suppElv(e.id),style:{background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:5,padding:"3px 7px",cursor:"pointer",fontWeight:900,fontSize:"0.75rem"}},"✕")
+                    React.createElement("button",{onClick:()=>suppElv(e.id),
+                      style:{background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:5,
+                        padding:"3px 7px",cursor:"pointer",fontWeight:900,fontSize:"0.75rem"}},"✕")
                   )
                 );
               })
@@ -1272,6 +1437,7 @@ const PageSaisie=({session,toast})=>{
     )
   );
 };
+
 
 // ═══════════════════════════════════════════════════
 // PAGE SYNTHÈSES
@@ -1343,9 +1509,9 @@ const PageSynthese=({session,toast})=>{
   const doExport=()=>{
     if(!synthese)return;
     const rows=[[`COMPOS SAKASSOU — ${cfg.inspection||"IEPP"}`],[`${f.compNum||"Toutes compos"} · ${f.annee||""}`],[`Généré le ${new Date().toLocaleDateString("fr-FR")}`],[],
-      ["École","Classe","Compos.","Rang","NOM","Prénoms","Sexe","Date Nais.","Moyenne/20","Mention","Décision"]];
+      ["École","Classe","Compos.","Rang","Matricule","NOM","Prénoms","Sexe","Date Nais.","Moyenne/20","Mention","Décision"]];
     synthese.forEach(s=>s.resultats.forEach(r=>{
-      rows.push([s.ecoleName,s.canevas.classe,s.canevas.compNum,r.rang,r.nom,r.prenom,r.sexe,r.dateNais||"",r.moyenne.toFixed(2),getMention(r.moyenne).label,r.moyenne>=10?"Admis(e)":"Redoublant(e)"]);
+      rows.push([s.ecoleName,s.canevas.classe,s.canevas.compNum,r.rang,r.matricule||"",r.nom,r.prenom,r.sexe,r.dateNais||"",r.moyenne.toFixed(2),getMention(r.moyenne).label,r.moyenne>=10?"Admis(e)":"Redoublant(e)"]);
     }));
     exportCSV(rows,"synthese_compos_sakassou_"+Date.now()+".csv");
     toast("Export CSV réussi !");
@@ -1406,7 +1572,7 @@ const PageSynthese=({session,toast})=>{
           React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
             React.createElement("thead",null,
               React.createElement("tr",{style:{background:"#f8fafc"}},
-                ...["Rang","NOM & Prénoms","Sx","Moy/20","Mention","Décision"].map(h=>
+                ...["Rang","Matricule","NOM & Prénoms","Sx","Moy/20","Mention","Décision"].map(h=>
                   React.createElement("th",{key:h,style:{padding:"7px 10px",borderBottom:"1px solid #e5e7eb",textAlign:h==="NOM & Prénoms"?"left":"center",color:"#374151",fontWeight:800,fontSize:"0.78rem"}},h)
                 )
               )
@@ -1416,6 +1582,7 @@ const PageSynthese=({session,toast})=>{
                 const mt=getMention(r.moyenne);
                 return React.createElement("tr",{key:r.id,style:{background:i%2===0?"white":"#fafafa",borderBottom:"1px solid #f1f5f9"}},
                   React.createElement("td",{style:{padding:"6px 10px",textAlign:"center",fontWeight:900,color:r.rang<=3?"#d97706":"#374151"}},r.rang===1?"🥇":r.rang===2?"🥈":r.rang===3?"🥉":r.rang),
+                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:"#0891b2",fontSize:"0.75rem",fontWeight:700}},r.matricule||"—"),
                   React.createElement("td",{style:{padding:"6px 10px",fontWeight:700}},r.nom,React.createElement("br"),React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},r.prenom)),
                   React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:r.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},r.sexe),
                   React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:900,color:mt.color}},r.moyenne.toFixed(2)),
