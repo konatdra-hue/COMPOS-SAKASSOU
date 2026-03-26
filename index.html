@@ -99,10 +99,14 @@ const LOGO_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAlgCWAAD/4QAiRXhpZgA
 // ═══════════════════════════════════════════════════
 // JSONBIN CONFIG
 // ═══════════════════════════════════════════════════
-const JSONBIN_KEY = "$2a$10$W7d2M49/pOKuNOaWKSqQBOaYcFyluf4Dv9ikM3.otEj43aOrZtvYu";
+const JSONBIN_KEY  = "$2a$10$W7d2M49/pOKuNOaWKSqQBOaYcFyluf4Dv9ikM3.otEj43aOrZtvYu";
 const JSONBIN_BASE = "https://api.jsonbin.io/v3";
 
-// ── Stockage local (IDs bins + cache hors-ligne) ──
+// Nom fixe et universel du bin-registre (même sur tous les appareils)
+// Ce bin contient un dictionnaire  { "sakassou_ecoles": "binId123", ... }
+const REGISTRY_BIN_NAME = "COMPOS_SAKASSOU_REGISTRY_V1";
+
+// ── Stockage local — cache IDs et données hors-ligne ──
 const LOCAL = {
   get:(k,d)=>{try{const r=localStorage.getItem("csk_"+k);return r!=null?JSON.parse(r):d;}catch{return d;}},
   set:(k,v)=>{try{localStorage.setItem("csk_"+k,JSON.stringify(v));}catch{}},
@@ -113,8 +117,8 @@ const IDB = {
   db: null,
   async open() {
     if(this.db) return this.db;
-    return new Promise((res,rej)=>{
-      const req = indexedDB.open("compos_sakassou_v1", 1);
+    return new Promise(res=>{
+      const req = indexedDB.open("compos_sakassou_v2", 1);
       req.onupgradeneeded = e => {
         const db = e.target.result;
         if(!db.objectStoreNames.contains("cache"))
@@ -126,7 +130,7 @@ const IDB = {
       req.onerror = () => res(null);
     });
   },
-  async cacheGet(k) {
+  async get(k) {
     try {
       const db = await this.open(); if(!db) return null;
       return new Promise(res=>{
@@ -137,18 +141,18 @@ const IDB = {
       });
     } catch { return null; }
   },
-  async cacheSet(k,v) {
+  async set(k,v) {
     try {
       const db = await this.open(); if(!db) return;
       const tx = db.transaction("cache","readwrite");
       tx.objectStore("cache").put({k, v, ts: Date.now()});
     } catch {}
   },
-  async queueAdd(name, data) {
+  async queueAdd(item) {
     try {
       const db = await this.open(); if(!db) return;
       const tx = db.transaction("queue","readwrite");
-      tx.objectStore("queue").add({name, data, ts: Date.now()});
+      tx.objectStore("queue").add({...item, ts: Date.now()});
     } catch {}
   },
   async queueGetAll() {
@@ -157,7 +161,7 @@ const IDB = {
       return new Promise(res=>{
         const tx = db.transaction("queue","readonly");
         const req = tx.objectStore("queue").getAll();
-        req.onsuccess = () => res(req.result || []);
+        req.onsuccess = () => res(req.result||[]);
         req.onerror = () => res([]);
       });
     } catch { return []; }
@@ -181,133 +185,254 @@ const NetStatus = {
 window.addEventListener("online",  () => { NetStatus.notify(); DB.flushQueue(); });
 window.addEventListener("offline", () => NetStatus.notify());
 
-// ═══════════════════════════════════════════════════
-// API JSONBIN — base de données partagée
-// + Cache hors-ligne (IndexedDB) + Queue de sync
-// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// DB — API JSONBin avec REGISTRE CENTRAL pour synchronisation
+//      multi-appareils / multi-navigateurs
+//
+// PRINCIPE :
+//  1. Un bin "registre" unique (REGISTRY_BIN_NAME) stocke les IDs
+//     de TOUS les autres bins { nom → binId }
+//  2. Au démarrage, chaque appareil récupère ce registre via
+//     l'API de recherche JSONBin (par nom) → trouve toujours
+//     les mêmes IDs peu importe l'appareil ou le navigateur
+//  3. Les IDs sont mis en cache local pour éviter une requête
+//     registre à chaque opération
+// ═══════════════════════════════════════════════════════════════
 const DB = {
-  // Créer un nouveau bin
-  async create(name, data) {
+  _registryId: null,   // ID du bin-registre
+  _registry:   null,   // contenu { nom→binId }
+  _regPromise: null,   // promise en cours pour éviter doublons
+
+  // ── Appel HTTP brut JSONBin ──
+  async _fetch(path, method="GET", body=null) {
     try {
-      const res = await fetch(`${JSONBIN_BASE}/b`, {
-        method: "POST",
+      const opts = {
+        method,
         headers: {
           "Content-Type": "application/json",
           "X-Master-Key": JSONBIN_KEY,
-          "X-Bin-Name": name,
-          "X-Bin-Private": "false"
+          ...(method==="POST" ? {"X-Bin-Private":"false"} : {})
         },
-        body: JSON.stringify(data)
-      });
-      const json = await res.json();
-      return json.metadata?.id || null;
+      };
+      if(body !== null) opts.body = JSON.stringify(body);
+      const res = await fetch(JSONBIN_BASE + path, opts);
+      if(!res.ok) return null;
+      return await res.json();
     } catch { return null; }
   },
 
-  // Lire un bin
-  async read(binId) {
-    try {
-      const res = await fetch(`${JSONBIN_BASE}/b/${binId}/latest`, {
-        headers: { "X-Master-Key": JSONBIN_KEY }
-      });
-      const json = await res.json();
-      return json.record || null;
-    } catch { return null; }
+  // ── Chercher le registre par son NOM via l'API de recherche JSONBin ──
+  async _findRegistry() {
+    // Recherche par nom exact dans tous les bins du compte
+    const res = await this._fetch(`/b?page=1&pageSize=100`, "GET");
+    if(!res) return null;
+    const bins = res.result || res;
+    if(!Array.isArray(bins)) return null;
+    const found = bins.find(b => b.snippetMeta?.name === REGISTRY_BIN_NAME
+                               || b.name === REGISTRY_BIN_NAME);
+    return found ? (found.id || found._id) : null;
   },
 
-  // Mettre à jour un bin
-  async update(binId, data) {
-    try {
-      const res = await fetch(`${JSONBIN_BASE}/b/${binId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Master-Key": JSONBIN_KEY
-        },
-        body: JSON.stringify(data)
-      });
-      return res.ok;
-    } catch { return false; }
-  },
+  // ── Charger ou créer le registre ──
+  // Appelé une seule fois au démarrage ; résultat mis en cache
+  async _loadRegistry() {
+    if(this._registry !== null) return this._registry;
+    if(this._regPromise) return this._regPromise;
 
-  // Lire ou créer — avec cache hors-ligne
-  async getOrCreate(name, defaultData) {
-    // 1. En ligne : tenter JSONBin
-    if (NetStatus.isOnline()) {
-      let binId = LOCAL.get("bin_"+name, null);
-      if (binId) {
-        const data = await this.read(binId);
-        if (data !== null) {
-          await IDB.cacheSet(name, {binId, data}); // mettre en cache
-          return { binId, data };
+    this._regPromise = (async () => {
+      // 1. Cache local (évite une requête réseau si déjà connu)
+      const cachedRegId = LOCAL.get("__regId", null);
+      if(cachedRegId) {
+        const res = await this._fetch(`/b/${cachedRegId}/latest`);
+        if(res?.record) {
+          this._registryId = cachedRegId;
+          this._registry   = res.record;
+          await IDB.set("__registry", {id:cachedRegId, data:res.record});
+          this._regPromise = null;
+          return this._registry;
         }
       }
-      // Créer nouveau bin
-      binId = await this.create(name, defaultData);
-      if (binId) {
-        LOCAL.set("bin_"+name, binId);
-        await IDB.cacheSet(name, {binId, data: defaultData});
-        return { binId, data: defaultData };
+
+      // 2. Rechercher le registre par nom sur JSONBin
+      const regId = await this._findRegistry();
+      if(regId) {
+        const res = await this._fetch(`/b/${regId}/latest`);
+        if(res?.record) {
+          this._registryId = regId;
+          this._registry   = res.record;
+          LOCAL.set("__regId", regId);
+          await IDB.set("__registry", {id:regId, data:res.record});
+          this._regPromise = null;
+          return this._registry;
+        }
       }
-    }
-    // 2. Hors-ligne : utiliser cache IndexedDB
-    const cached = await IDB.cacheGet(name);
-    if (cached) return cached;
-    // 3. Fallback localStorage
-    const binId = LOCAL.get("bin_"+name, null);
-    return { binId, data: defaultData };
+
+      // 3. Créer le registre (premier appareil à se connecter)
+      const created = await this._fetch("/b", "POST", {});
+      // On doit aussi nommer le bin via un second appel PATCH metadata
+      if(created?.metadata?.id) {
+        const newRegId = created.metadata.id;
+        // Nommer le bin pour qu'il soit trouvable
+        await this._fetch(`/b/${newRegId}/meta/name`, "PUT", {name: REGISTRY_BIN_NAME});
+        this._registryId = newRegId;
+        this._registry   = {};
+        LOCAL.set("__regId", newRegId);
+        await IDB.set("__registry", {id:newRegId, data:{}});
+        this._regPromise = null;
+        return this._registry;
+      }
+
+      // 4. Fallback hors-ligne : utiliser cache IDB
+      const idbReg = await IDB.get("__registry");
+      if(idbReg) {
+        this._registryId = idbReg.id;
+        this._registry   = idbReg.data;
+      } else {
+        this._registry = {};
+      }
+      this._regPromise = null;
+      return this._registry;
+    })();
+
+    return this._regPromise;
   },
 
-  // Sauvegarder — avec queue hors-ligne
+  // ── Obtenir l'ID d'un bin par son nom (via le registre) ──
+  async _getBinId(name) {
+    const reg = await this._loadRegistry();
+    return reg[name] || null;
+  },
+
+  // ── Enregistrer un nouveau binId dans le registre ──
+  async _registerBin(name, binId) {
+    const reg = await this._loadRegistry();
+    reg[name] = binId;
+    this._registry = reg;
+    // Mettre à jour le registre sur JSONBin
+    if(this._registryId) {
+      await this._fetch(`/b/${this._registryId}`, "PUT", reg);
+    }
+    // Mettre à jour cache local
+    LOCAL.set("__regId", this._registryId);
+    await IDB.set("__registry", {id:this._registryId, data:reg});
+  },
+
+  // ── Lire un bin ──
+  async read(binId) {
+    const res = await this._fetch(`/b/${binId}/latest`);
+    return res?.record ?? null;
+  },
+
+  // ── Créer un bin ──
+  async create(name, data) {
+    const res = await this._fetch("/b", "POST", data);
+    if(!res?.metadata?.id) return null;
+    const binId = res.metadata.id;
+    // Nommer le bin (optionnel mais utile)
+    await this._fetch(`/b/${binId}/meta/name`, "PUT", {name});
+    return binId;
+  },
+
+  // ── Mettre à jour un bin ──
+  async update(binId, data) {
+    const res = await this._fetch(`/b/${binId}`, "PUT", data);
+    return res !== null;
+  },
+
+  // ── getOrCreate : récupère via le REGISTRE CENTRAL ──
+  // Tous les appareils trouvent le même bin par son nom
+  async getOrCreate(name, defaultData) {
+    if(NetStatus.isOnline()) {
+      try {
+        // 1. Chercher l'ID dans le registre central
+        let binId = await this._getBinId(name);
+
+        if(binId) {
+          // 2. Lire les données
+          const data = await this.read(binId);
+          if(data !== null) {
+            // Mettre en cache local
+            LOCAL.set("bin_"+name, binId);
+            await IDB.set(name, {binId, data});
+            return {binId, data};
+          }
+        }
+
+        // 3. Bin introuvable → créer et enregistrer dans le registre
+        binId = await this.create(name, defaultData);
+        if(binId) {
+          await this._registerBin(name, binId);
+          LOCAL.set("bin_"+name, binId);
+          await IDB.set(name, {binId, data: defaultData});
+          return {binId, data: defaultData};
+        }
+      } catch(e) {
+        console.error("getOrCreate error:", e);
+      }
+    }
+
+    // Hors-ligne : utiliser cache IDB
+    const cached = await IDB.get(name);
+    if(cached) return cached;
+    return {binId: null, data: defaultData};
+  },
+
+  // ── save : sauvegarde via registre + cache hors-ligne ──
   async save(name, data) {
-    // Mettre à jour le cache local immédiatement
-    const cached = await IDB.cacheGet(name);
-    const binId = LOCAL.get("bin_"+name, cached?.binId || null);
-    if (binId) await IDB.cacheSet(name, {binId, data});
+    // Mise à jour cache local immédiate
+    const cached = await IDB.get(name);
+    const binId = cached?.binId || LOCAL.get("bin_"+name, null);
+    await IDB.set(name, {binId, data});
 
-    // Si hors-ligne : mettre en queue
-    if (!NetStatus.isOnline()) {
-      await IDB.queueAdd(name, {name, data, binId});
-      return true; // succès local
+    if(!NetStatus.isOnline()) {
+      // Hors-ligne : mettre en queue
+      await IDB.queueAdd({name, data, binId});
+      return true;
     }
 
-    // Si en ligne : sauvegarder directement
-    if (binId) {
-      const ok = await this.update(binId, data);
-      if (ok) { await IDB.cacheSet(name, {binId, data}); return true; }
+    // En ligne
+    let id = binId || await this._getBinId(name);
+    if(id) {
+      const ok = await this.update(id, data);
+      if(ok) {
+        await IDB.set(name, {binId:id, data});
+        return true;
+      }
     }
-    // Recréer si perdu
+
+    // Recréer si bin perdu
     const newId = await this.create(name, data);
-    if (newId) {
+    if(newId) {
+      await this._registerBin(name, newId);
       LOCAL.set("bin_"+name, newId);
-      await IDB.cacheSet(name, {binId: newId, data});
+      await IDB.set(name, {binId:newId, data});
       return true;
     }
     return false;
   },
 
-  // Vider la queue hors-ligne quand on se reconnecte
+  // ── Vider la queue hors-ligne ──
   async flushQueue() {
     const queue = await IDB.queueGetAll();
-    if (!queue.length) return;
-    console.log(`Sync: ${queue.length} opération(s) en attente...`);
+    if(!queue.length) return;
     let allOk = true;
-    for (const item of queue) {
-      const {name, data, binId} = item.data;
-      let ok = false;
-      if (binId) ok = await this.update(binId, data);
-      if (!ok) {
-        const newId = await this.create(name, data);
-        if (newId) { LOCAL.set("bin_"+name, newId); ok = true; }
-      }
-      if (!ok) allOk = false;
+    for(const item of queue) {
+      const {name, data} = item;
+      const ok = await this.save(name, data);
+      if(!ok) allOk = false;
     }
-    if (allOk) {
+    if(allOk) {
       await IDB.queueClear();
-      console.log("Sync terminée avec succès !");
-      // Notifier l'UI
       window.dispatchEvent(new CustomEvent("sync-done"));
     }
+  },
+
+  // ── Forcer rechargement du registre (utile après long délai) ──
+  async resetRegistry() {
+    this._registry   = null;
+    this._registryId = null;
+    this._regPromise = null;
+    LOCAL.set("__regId", null);
   }
 };
 
@@ -317,42 +442,67 @@ const DB = {
 const CLASSES=["CP1","CP2","CE1","CE2","CM1","CM2"];
 const COMPOSITIONS=["Composition 1","Composition 2","Composition 3","Composition 4"];
 const ANNEES=["2022-2023","2023-2024","2024-2025","2025-2026","2026-2027"];
-const MENTIONS=[
-  {label:"Excellent",min:18,color:"#059669",bg:"#d1fae5"},
-  {label:"Très Bien",min:16,color:"#2563eb",bg:"#dbeafe"},
-  {label:"Bien",min:14,color:"#7c3aed",bg:"#ede9fe"},
-  {label:"Assez Bien",min:12,color:"#0891b2",bg:"#cffafe"},
-  {label:"Passable",min:10,color:"#d97706",bg:"#fef3c7"},
-  {label:"Insuffisant",min:0,color:"#dc2626",bg:"#fee2e2"},
+// Base de notation selon la classe : CP1→CM1 = /10, CM2 = /20
+const BASE_PAR_CLASSE={CP1:10,CP2:10,CE1:10,CE2:10,CM1:10,CM2:20};
+const getBase=classe=>BASE_PAR_CLASSE[classe]||20;
+
+// Mentions adaptées à la base (valeurs sur 20, divisées si base=10)
+const MENTIONS_20=[
+  {label:"Excellent",      min:18, color:"#059669", bg:"#d1fae5"},
+  {label:"Très Bien",      min:16, color:"#2563eb", bg:"#dbeafe"},
+  {label:"Bien",           min:14, color:"#7c3aed", bg:"#ede9fe"},
+  {label:"Assez Bien",     min:12, color:"#0891b2", bg:"#cffafe"},
+  {label:"Passable",       min:10, color:"#d97706", bg:"#fef3c7"},
+  {label:"Insuffisant",    min:0,  color:"#dc2626", bg:"#fee2e2"},
 ];
-const getMention=m=>MENTIONS.find(x=>parseFloat(m)>=x.min)||MENTIONS[MENTIONS.length-1];
+const MENTIONS_10=[
+  {label:"Excellent",      min:9,  color:"#059669", bg:"#d1fae5"},
+  {label:"Très Bien",      min:8,  color:"#2563eb", bg:"#dbeafe"},
+  {label:"Bien",           min:7,  color:"#7c3aed", bg:"#ede9fe"},
+  {label:"Assez Bien",     min:6,  color:"#0891b2", bg:"#cffafe"},
+  {label:"Passable",       min:5,  color:"#d97706", bg:"#fef3c7"},
+  {label:"Insuffisant",    min:0,  color:"#dc2626", bg:"#fee2e2"},
+];
+// Par défaut (sans classe connue) on utilise /20
+const MENTIONS=MENTIONS_20;
+const getMention=(m,classe)=>{
+  const mentions=getBase(classe)===10?MENTIONS_10:MENTIONS_20;
+  return mentions.find(x=>parseFloat(m)>=x.min)||mentions[mentions.length-1];
+};
+const getSeuilAdmis=classe=>getBase(classe)===10?5:10;
 
 // ═══════════════════════════════════════════════════
 // CALCULS
 // ═══════════════════════════════════════════════════
-const calcMoy=(notesElv,matieres)=>{
+// calcMoy : normalise chaque note sur la BASE (10 ou 20 selon classe)
+const calcMoy=(notesElv,matieres,classe)=>{
+  const base=getBase(classe);
   let pts=0,coef=0;
   (matieres||[]).forEach(m=>{
     const n=parseFloat(notesElv?.[m.nom]);
-    const noteMax=parseFloat(m.noteMax||20);
+    const noteMax=parseFloat(m.noteMax||base);
     const c=parseFloat(m.coeff||1);
     if(!isNaN(n)&&n>=0&&noteMax>0){
-      // Normalise la note sur 20 avant d'appliquer le coefficient
-      pts+=(n/noteMax)*20*c;
+      // Normalise sur la base (10 ou 20)
+      pts+=(n/noteMax)*base*c;
       coef+=c;
     }
   });
   return coef>0?pts/coef:null;
 };
 
-const calcSynthese=(eleves,notes,matieres)=>{
-  const res=eleves.map(e=>({...e,moyenne:calcMoy(notes?.[e.id],matieres)})).filter(r=>r.moyenne!==null);
+const calcSynthese=(eleves,notes,matieres,classe)=>{
+  const seuil=getSeuilAdmis(classe);
+  const res=eleves.map(e=>({...e,moyenne:calcMoy(notes?.[e.id],matieres,classe)})).filter(r=>r.moyenne!==null);
   if(!res.length) return null;
   res.sort((a,b)=>b.moyenne-a.moyenne);
   let rang=1;
   res.forEach((r,i)=>{if(i>0&&res[i].moyenne<res[i-1].moyenne)rang=i+1;r.rang=rang;});
-  const total=res.length,admis=res.filter(r=>r.moyenne>=10).length;
-  return{resultats:res,total,admis,echec:total-admis,moyClasse:res.reduce((s,r)=>s+r.moyenne,0)/total,taux:admis/total*100};
+  const total=res.length,admis=res.filter(r=>r.moyenne>=seuil).length;
+  const base=getBase(classe);
+  return{resultats:res,total,admis,echec:total-admis,
+    moyClasse:res.reduce((s,r)=>s+r.moyenne,0)/total,
+    taux:admis/total*100,base,seuil,classe};
 };
 
 const exportCSV=(rows,fn)=>{
@@ -808,11 +958,11 @@ const PageCanevas=({session,toast})=>{
   useEffect(()=>{refresh().then(()=>setLoading(false));}, []);
 
   const SUGG={
-    CP1:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"20"}],
-    CP2:[{nom:"Lecture",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"3",noteMax:"20"},{nom:"Calcul",coeff:"3",noteMax:"20"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"20"}],
-    CE1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
-    CE2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Écriture",coeff:"2",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire-Géo",coeff:"1",noteMax:"20"}],
-    CM1:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
+    CP1:[{nom:"Lecture",coeff:"3",noteMax:"10"},{nom:"Écriture",coeff:"3",noteMax:"10"},{nom:"Calcul",coeff:"3",noteMax:"10"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"10"}],
+    CP2:[{nom:"Lecture",coeff:"3",noteMax:"10"},{nom:"Écriture",coeff:"3",noteMax:"10"},{nom:"Calcul",coeff:"3",noteMax:"10"},{nom:"Activités d\'Éveil",coeff:"1",noteMax:"10"}],
+    CE1:[{nom:"Français",coeff:"3",noteMax:"10"},{nom:"Mathématiques",coeff:"3",noteMax:"10"},{nom:"Écriture",coeff:"2",noteMax:"10"},{nom:"Sciences",coeff:"2",noteMax:"10"},{nom:"Histoire-Géo",coeff:"1",noteMax:"10"}],
+    CE2:[{nom:"Français",coeff:"3",noteMax:"10"},{nom:"Mathématiques",coeff:"3",noteMax:"10"},{nom:"Écriture",coeff:"2",noteMax:"10"},{nom:"Sciences",coeff:"2",noteMax:"10"},{nom:"Histoire-Géo",coeff:"1",noteMax:"10"}],
+    CM1:[{nom:"Français",coeff:"3",noteMax:"10"},{nom:"Mathématiques",coeff:"3",noteMax:"10"},{nom:"Sciences",coeff:"2",noteMax:"10"},{nom:"Histoire",coeff:"2",noteMax:"10"},{nom:"Géographie",coeff:"2",noteMax:"10"},{nom:"Anglais",coeff:"2",noteMax:"10"}],
     CM2:[{nom:"Français",coeff:"3",noteMax:"20"},{nom:"Mathématiques",coeff:"3",noteMax:"20"},{nom:"Sciences",coeff:"2",noteMax:"20"},{nom:"Histoire",coeff:"2",noteMax:"20"},{nom:"Géographie",coeff:"2",noteMax:"20"},{nom:"Anglais",coeff:"2",noteMax:"20"}],
   };
 
@@ -1210,7 +1360,7 @@ const PageSaisie=({session,toast})=>{
 
   const getMoy=eid=>{
     if(!cnv) return null;
-    const m=calcMoy(notes[eid],cnv.matieres);
+    const m=calcMoy(notes[eid],cnv.matieres,cnv.classe);
     return m!==null?m.toFixed(2):null;
   };
 
@@ -1384,14 +1534,14 @@ const PageSaisie=({session,toast})=>{
                   React.createElement("span",{style:{color:"#9ca3af",fontWeight:600,fontSize:"0.68rem"}},"/"+m.noteMax+" ×"+m.coeff)
                 )),
                 React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
-                  minWidth:72,background:"#f0fdf4",color:"#166534",fontWeight:900}},"Moy/20"),
+                  minWidth:72,background:"#f0fdf4",color:"#166534",fontWeight:900}},"Moy/"+(cnv?getBase(cnv.classe):20)),
                 React.createElement("th",{style:{padding:"8px 6px",borderBottom:"2px solid #e5e7eb",width:36}})
               )
             ),
             React.createElement("tbody",null,
               ...eleves.map((e,i)=>{
                 const moy=getMoy(e.id);
-                const mt=moy?getMention(moy):null;
+                const mt=moy?getMention(moy,cnv?.classe):null;
                 const bg=i%2===0?"white":"#fafafa";
                 return React.createElement("tr",{key:e.id,style:{background:bg,borderBottom:"1px solid #f1f5f9"}},
                   // Matricule
@@ -1471,16 +1621,16 @@ const PageSynthese=({session,toast})=>{
   const generer=async()=>{
     setGenLoading(true);setSynthese(null);
     const myCnv=Object.values(allCnv).filter(c=>{
-      // canevas global — pas de filtre par école
-      if(f.ecoleId&&c.ecoleId!==f.ecoleId) return false;
       if(f.classe&&c.classe!==f.classe) return false;
       if(f.compNum&&c.compNum!==f.compNum) return false;
       if(f.annee&&c.annee!==f.annee) return false;
       return true;
     });
     if(!myCnv.length){setGenLoading(false);toast("Aucun canevas trouvé","err");return;}
-    // Chaque canevas × chaque école → une synthèse
-    const allEcoles=isEx?Object.keys(ecoles):[session.ecole?.id].filter(Boolean);
+    // Pour école: seulement sa propre école; pour examens: filtre optionnel
+    const allEcoles=isEx
+      ?(f.ecoleId?[f.ecoleId]:Object.keys(ecoles))
+      :[session.ecole?.id].filter(Boolean);
     const pairs=[];
     myCnv.forEach(c=>allEcoles.forEach(e_id=>pairs.push({c,e_id})));
     const results=await Promise.all(pairs.map(async ({c,e_id})=>{
@@ -1488,8 +1638,19 @@ const PageSynthese=({session,toast})=>{
         DB.getOrCreate("sakassou_elv_"+c.id+"_"+e_id,[]),
         DB.getOrCreate("sakassou_nts_"+c.id+"_"+e_id,{})
       ]);
-      const syn=calcSynthese(re?.data||[],rn?.data||{},c.matieres);
-      return syn?{...syn,canevas:c,ecoleName:ecoleName(e_id),directeur:ecoleDir(e_id)}:null;
+      const syn=calcSynthese(re?.data||[],rn?.data||{},c.matieres,c.classe);
+      if(!syn) return null;
+      // Enrichir chaque résultat avec le total des notes
+      syn.resultats=syn.resultats.map(r=>{
+        const notesElv=rn?.data?.[r.id]||{};
+        const totalNotes=c.matieres.reduce((s,m)=>{
+          const n=parseFloat(notesElv[m.nom]);
+          return s+(isNaN(n)?0:n);
+        },0);
+        const coefTotal=c.matieres.reduce((s,m)=>s+parseFloat(m.coeff||1),0);
+        return {...r,notesElv,totalNotes,coefTotal};
+      });
+      return {...syn,canevas:c,ecoleName:ecoleName(e_id),directeur:ecoleDir(e_id),ecoleId:e_id};
     }));
     const res=results.filter(Boolean);
     setGenLoading(false);
@@ -1508,38 +1669,72 @@ const PageSynthese=({session,toast})=>{
 
   const doExport=()=>{
     if(!synthese)return;
-    const rows=[[`COMPOS SAKASSOU — ${cfg.inspection||"IEPP"}`],[`${f.compNum||"Toutes compos"} · ${f.annee||""}`],[`Généré le ${new Date().toLocaleDateString("fr-FR")}`],[],
-      ["École","Classe","Compos.","Rang","Matricule","NOM","Prénoms","Sexe","Date Nais.","Moyenne/20","Mention","Décision"]];
+    const rows=[[`COMPOS SAKASSOU — ${cfg.inspection||"IEPP"}`],
+      [`${f.compNum||"Toutes compos"} · ${f.annee||""}`],
+      [`Généré le ${new Date().toLocaleDateString("fr-FR")}`],[],
+      ["École","Classe","Compos.","Rang","Matricule","NOM","Prénoms","Sexe","Date Nais.","Total Notes","Moy/Base","Mention","Décision"]];
     synthese.forEach(s=>s.resultats.forEach(r=>{
-      rows.push([s.ecoleName,s.canevas.classe,s.canevas.compNum,r.rang,r.matricule||"",r.nom,r.prenom,r.sexe,r.dateNais||"",r.moyenne.toFixed(2),getMention(r.moyenne).label,r.moyenne>=10?"Admis(e)":"Redoublant(e)"]);
+      rows.push([s.ecoleName,s.canevas.classe,s.canevas.compNum,r.rang,
+        r.matricule||"",r.nom,r.prenom,r.sexe,r.dateNais||"",
+        r.totalNotes.toFixed(2),r.moyenne.toFixed(2)+"/"+s.base,
+        getMention(r.moyenne,s.canevas.classe).label,
+        r.moyenne>=(s.seuil||10)?"Admis(e)":"Redoublant(e)"]);
     }));
     exportCSV(rows,"synthese_compos_sakassou_"+Date.now()+".csv");
     toast("Export CSV réussi !");
   };
 
+  // Bloc statistiques école (réutilisable)
+  const StatsEcole=({s})=>{
+    const base=s.base||20;
+    const mt=getMention(s.moyClasse,s.canevas?.classe);
+    return React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,margin:"10px 0"}},
+      React.createElement(StatBox,{val:s.total,label:"Effectif total",color:"#0f766e",icon:"👥"}),
+      React.createElement(StatBox,{val:s.admis,label:"Admis(es)",color:"#166534",icon:"✅"}),
+      React.createElement(StatBox,{val:s.echec,label:"Échecs",color:"#dc2626",icon:"❌"}),
+      React.createElement(StatBox,{val:s.taux.toFixed(1)+"%",label:"Taux réussite",color:"#d97706",icon:"📈"}),
+      React.createElement(StatBox,{val:s.resultats.filter(r=>r.sexe==="M").length,label:"Garçons",color:"#2563eb",icon:"👦"}),
+      React.createElement(StatBox,{val:s.resultats.filter(r=>r.sexe==="F").length,label:"Filles",color:"#db2777",icon:"👧"}),
+      React.createElement("div",{style:{gridColumn:"1/-1",background:"white",borderRadius:10,padding:"10px",
+        textAlign:"center",border:"2px solid #99f6e4",display:"flex",alignItems:"center",justifyContent:"center",gap:16}},
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:"1.6rem",fontWeight:900,color:mt.color}},s.moyClasse.toFixed(2)+"/"+base),
+          React.createElement("div",{style:{color:"#6b7280",fontWeight:700,fontSize:"0.7rem"}},"MOYENNE DE CLASSE")
+        ),
+        React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label)
+      )
+    );
+  };
+
   if(loading) return React.createElement(Loader,{msg:"Chargement..."});
 
-  return React.createElement("div",{style:{maxWidth:1000,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
+  return React.createElement("div",{style:{maxWidth:1100,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}},
     React.createElement("div",{style:{background:"linear-gradient(135deg,#0f766e,#0d9488)",borderRadius:18,padding:22,color:"white"}},
       React.createElement("h2",{style:{fontSize:"1.2rem",fontWeight:900}},"📊 Synthèses & Rapports"),
-      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},"Données de toutes les écoles · Synchronisées")
+      React.createElement("p",{style:{opacity:0.85,fontSize:"0.83rem",marginTop:4}},
+        isEx?"Données de toutes les écoles · Synchronisées":"Statistiques de "+session.ecole?.nom)
     ),
+    // Filtres
     React.createElement(Card,null,
       React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:12}},
-        isEx&&React.createElement(Sel,{label:"École",value:f.ecoleId,onChange:v=>setF({...f,ecoleId:v}),options:Object.values(ecoles).map(e=>({v:e.id,l:e.nom}))}),
+        isEx&&React.createElement(Sel,{label:"École",value:f.ecoleId,onChange:v=>setF({...f,ecoleId:v}),
+          options:Object.values(ecoles).map(e=>({v:e.id,l:e.nom}))}),
         React.createElement(Sel,{label:"Classe",value:f.classe,onChange:v=>setF({...f,classe:v}),options:CLASSES}),
         React.createElement(Sel,{label:"Composition",value:f.compNum,onChange:v=>setF({...f,compNum:v}),options:COMPOSITIONS}),
         React.createElement(Sel,{label:"Année scolaire",value:f.annee,onChange:v=>setF({...f,annee:v}),options:ANNEES})
       ),
       React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
-        React.createElement(Btn,{onClick:generer,color:"#0f766e",icon:"⚡",disabled:genLoading},genLoading?"Chargement...":"Générer la synthèse"),
+        React.createElement(Btn,{onClick:generer,color:"#0f766e",icon:"⚡",disabled:genLoading},
+          genLoading?"Chargement...":"Générer la synthèse"),
         synthese&&React.createElement(Btn,{outline:true,color:"#0f766e",onClick:doExport,icon:"📥"},"Exporter CSV"),
         synthese&&React.createElement(Btn,{outline:true,color:"#6b7280",onClick:()=>window.print(),icon:"🖨️"},"Imprimer / PDF")
       )
     ),
     genLoading&&React.createElement(Loader,{msg:"Récupération des données..."}),
+
     synthese&&React.createElement(React.Fragment,null,
-      React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdfa,#ccfbf1)",border:"2px solid #99f6e4"}},
+      // Stats globales (Examens seulement ou multi-école)
+      isEx&&synthese.length>0&&React.createElement(Card,{style:{background:"linear-gradient(135deg,#f0fdfa,#ccfbf1)",border:"2px solid #99f6e4"}},
         React.createElement("div",{style:{fontWeight:900,color:"#0f766e",marginBottom:12}},
           "📈 Résumé Global — "+(cfg.inspection||"Inspection")+" · "+(f.compNum||"Toutes compositions")),
         React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}},
@@ -1550,65 +1745,167 @@ const PageSynthese=({session,toast})=>{
           React.createElement(StatBox,{val:global.garcons,label:"Garçons",color:"#2563eb",icon:"👦"}),
           React.createElement(StatBox,{val:global.filles,label:"Filles",color:"#db2777",icon:"👧"})
         ),
-        React.createElement("div",{style:{marginTop:12,background:"white",borderRadius:10,padding:12,textAlign:"center",border:"2px solid #99f6e4"}},
-          React.createElement("div",{style:{fontSize:"1.8rem",fontWeight:900,color:"#0f766e"}},global.moy.toFixed(2)+"/20"),
+        React.createElement("div",{style:{marginTop:12,background:"white",borderRadius:10,padding:12,
+          textAlign:"center",border:"2px solid #99f6e4"}},
+          React.createElement("div",{style:{fontSize:"1.8rem",fontWeight:900,color:"#0f766e"}},
+            global.moy.toFixed(2)+"/20"),
           React.createElement("div",{style:{color:"#6b7280",fontWeight:700,fontSize:"0.75rem"}},"MOYENNE GÉNÉRALE"),
-          React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},getMention(global.moy).label)
+          React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},
+            getMention(global.moy).label)
         )
       ),
-      ...synthese.map((s,idx)=>React.createElement(Card,{key:idx,style:{padding:0,overflow:"hidden"}},
-        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#0f766e,#0d9488)",color:"white",display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8}},
-          React.createElement("div",null,
-            React.createElement("div",{style:{fontWeight:900}},s.ecoleName),
-            React.createElement("div",{style:{fontSize:"0.78rem",opacity:0.9}},(s.directeur?"Dir: "+s.directeur+" · ":"")+s.canevas.classe+" · "+s.canevas.compNum)
-          ),
-          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
-            React.createElement(Badge,{color:"white",bg:"rgba(255,255,255,0.2)"},"👥 "+s.total),
-            React.createElement(Badge,{color:"white",bg:"rgba(22,163,74,0.5)"},"✅ "+s.admis+" ("+s.taux.toFixed(0)+"%)"),
-            React.createElement(Badge,{color:"white",bg:"rgba(146,64,14,0.5)"},"📊 "+s.moyClasse.toFixed(2)+"/20")
-          )
-        ),
-        React.createElement("div",{style:{overflowX:"auto"}},
-          React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
-            React.createElement("thead",null,
-              React.createElement("tr",{style:{background:"#f8fafc"}},
-                ...["Rang","Matricule","NOM & Prénoms","Sx","Moy/20","Mention","Décision"].map(h=>
-                  React.createElement("th",{key:h,style:{padding:"7px 10px",borderBottom:"1px solid #e5e7eb",textAlign:h==="NOM & Prénoms"?"left":"center",color:"#374151",fontWeight:800,fontSize:"0.78rem"}},h)
-                )
-              )
+
+      // Détail par école / classe
+      ...synthese.map((s,idx)=>{
+        const base=s.base||20;
+        const seuil=s.seuil||(base===10?5:10);
+        return React.createElement(Card,{key:idx,style:{padding:0,overflow:"hidden"}},
+          // En-tête école+classe
+          React.createElement("div",{style:{padding:"10px 14px",
+            background:"linear-gradient(90deg,#0f766e,#0d9488)",color:"white",
+            display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8}},
+            React.createElement("div",null,
+              React.createElement("div",{style:{fontWeight:900}},s.ecoleName),
+              React.createElement("div",{style:{fontSize:"0.78rem",opacity:0.9}},
+                (s.directeur?"Dir: "+s.directeur+" · ":"")+s.canevas.classe+" · "+s.canevas.compNum+" · "+s.canevas.annee)
             ),
-            React.createElement("tbody",null,
-              ...s.resultats.map((r,i)=>{
-                const mt=getMention(r.moyenne);
-                return React.createElement("tr",{key:r.id,style:{background:i%2===0?"white":"#fafafa",borderBottom:"1px solid #f1f5f9"}},
-                  React.createElement("td",{style:{padding:"6px 10px",textAlign:"center",fontWeight:900,color:r.rang<=3?"#d97706":"#374151"}},r.rang===1?"🥇":r.rang===2?"🥈":r.rang===3?"🥉":r.rang),
-                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:"#0891b2",fontSize:"0.75rem",fontWeight:700}},r.matricule||"—"),
-                  React.createElement("td",{style:{padding:"6px 10px",fontWeight:700}},r.nom,React.createElement("br"),React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.75rem"}},r.prenom)),
-                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",color:r.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},r.sexe),
-                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center",fontWeight:900,color:mt.color}},r.moyenne.toFixed(2)),
-                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label)),
-                  React.createElement("td",{style:{padding:"6px 8px",textAlign:"center"}},React.createElement(Badge,{color:r.moyenne>=10?"#166534":"#dc2626",bg:r.moyenne>=10?"#d1fae5":"#fee2e2"},r.moyenne>=10?"✅ Admis(e)":"❌ Redoublant(e)"))
-                );
-              })
+            React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+              React.createElement(Badge,{color:"white",bg:"rgba(255,255,255,0.2)"},"👥 "+s.total),
+              React.createElement(Badge,{color:"white",bg:"rgba(22,163,74,0.5)"},"✅ "+s.admis+" ("+s.taux.toFixed(0)+"%)"),
+              React.createElement(Badge,{color:"white",bg:"rgba(146,64,14,0.5)"},
+                "📊 "+s.moyClasse.toFixed(2)+"/"+base)
+            )
+          ),
+
+          // ── STATS ÉCOLE EN HAUT ──
+          React.createElement("div",{style:{padding:"10px 14px",background:"#f0fdfa"}},
+            React.createElement("div",{style:{fontWeight:800,color:"#0f766e",fontSize:"0.82rem",marginBottom:8}},
+              "📊 Statistiques — "+s.ecoleName+" · "+s.canevas.classe),
+            React.createElement(StatsEcole,{s})
+          ),
+
+          // ── TABLEAU ÉLÈVES AVEC NOTES + RANG + APPRÉCIATION ──
+          React.createElement("div",{style:{overflowX:"auto"}},
+            React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.79rem"}},
+              React.createElement("thead",null,
+                React.createElement("tr",{style:{background:"#f8fafc"}},
+                  React.createElement("th",{style:{padding:"7px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
+                    fontWeight:900,color:"#d97706"}},"Rang"),
+                  React.createElement("th",{style:{padding:"7px 6px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
+                    color:"#0891b2",fontWeight:800,minWidth:85}},"Matricule"),
+                  React.createElement("th",{style:{padding:"7px 10px",borderBottom:"2px solid #e5e7eb",
+                    textAlign:"left",minWidth:150}},"NOM & Prénoms"),
+                  React.createElement("th",{style:{padding:"7px 5px",borderBottom:"2px solid #e5e7eb",textAlign:"center"}},"Sx"),
+                  // Colonnes notes matières
+                  ...s.canevas.matieres.map(m=>React.createElement("th",{key:m.nom,
+                    style:{padding:"5px 4px",borderBottom:"2px solid #e5e7eb",textAlign:"center",
+                      minWidth:70,color:"#7c3aed",fontWeight:800,fontSize:"0.72rem"}},
+                    m.nom,React.createElement("br"),
+                    React.createElement("span",{style:{color:"#9ca3af",fontWeight:600,fontSize:"0.65rem"}},
+                      "/"+m.noteMax+"×"+m.coeff)
+                  )),
+                  React.createElement("th",{style:{padding:"7px 5px",borderBottom:"2px solid #e5e7eb",
+                    textAlign:"center",minWidth:60,background:"#fef3c7",color:"#b45309",fontWeight:800}},
+                    "Total"),
+                  React.createElement("th",{style:{padding:"7px 5px",borderBottom:"2px solid #e5e7eb",
+                    textAlign:"center",minWidth:70,background:"#f0fdf4",color:"#166534",fontWeight:900}},
+                    "Moy/"+base),
+                  React.createElement("th",{style:{padding:"7px 5px",borderBottom:"2px solid #e5e7eb",
+                    textAlign:"center",minWidth:90}},"Appréciation"),
+                  React.createElement("th",{style:{padding:"7px 5px",borderBottom:"2px solid #e5e7eb",
+                    textAlign:"center",minWidth:100}},"Décision")
+                )
+              ),
+              React.createElement("tbody",null,
+                ...s.resultats.map((r,i)=>{
+                  const mt=getMention(r.moyenne,s.canevas.classe);
+                  const admis=r.moyenne>=seuil;
+                  const bg=i%2===0?"white":"#fafafa";
+                  return React.createElement("tr",{key:r.id,
+                    style:{background:bg,borderBottom:"1px solid #f1f5f9"}},
+                    // Rang
+                    React.createElement("td",{style:{padding:"6px 6px",textAlign:"center",
+                      fontWeight:900,color:r.rang<=3?"#d97706":"#374151"}},
+                      r.rang===1?"🥇":r.rang===2?"🥈":r.rang===3?"🥉":r.rang),
+                    // Matricule
+                    React.createElement("td",{style:{padding:"5px 6px",textAlign:"center",
+                      color:"#0891b2",fontSize:"0.75rem",fontWeight:700}},r.matricule||"—"),
+                    // Nom
+                    React.createElement("td",{style:{padding:"5px 10px",fontWeight:700}},
+                      r.nom,React.createElement("br"),
+                      React.createElement("span",{style:{fontWeight:400,color:"#6b7280",fontSize:"0.74rem"}},r.prenom)),
+                    // Sexe
+                    React.createElement("td",{style:{padding:"5px 5px",textAlign:"center",
+                      color:r.sexe==="F"?"#db2777":"#2563eb",fontWeight:800}},r.sexe),
+                    // Notes par matière
+                    ...s.canevas.matieres.map(m=>React.createElement("td",{key:m.nom,
+                      style:{padding:"5px 4px",textAlign:"center",
+                        color:parseFloat(r.notesElv?.[m.nom])>=(parseFloat(m.noteMax)/2)?"#166534":"#dc2626",
+                        fontWeight:600}},
+                      r.notesElv?.[m.nom]!==undefined&&r.notesElv[m.nom]!==""
+                        ?r.notesElv[m.nom]
+                        :React.createElement("span",{style:{color:"#d1d5db"}},"—")
+                    )),
+                    // Total notes brutes
+                    React.createElement("td",{style:{padding:"5px 5px",textAlign:"center",
+                      background:"#fef9c3",fontWeight:800,color:"#b45309"}},
+                      r.totalNotes.toFixed(2)),
+                    // Moyenne
+                    React.createElement("td",{style:{padding:"5px 5px",textAlign:"center",
+                      background:"#f0fdf4",fontWeight:900,color:mt.color}},
+                      r.moyenne.toFixed(2)),
+                    // Appréciation
+                    React.createElement("td",{style:{padding:"5px 5px",textAlign:"center"}},
+                      React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label)),
+                    // Décision
+                    React.createElement("td",{style:{padding:"5px 5px",textAlign:"center"}},
+                      React.createElement(Badge,{
+                        color:admis?"#166534":"#dc2626",
+                        bg:admis?"#d1fae5":"#fee2e2"},
+                        admis?"✅ Admis(e)":"❌ Redoublant(e)"))
+                  );
+                })
+              )
+            )
+          ),
+
+          // ── STATS ÉCOLE EN BAS ──
+          React.createElement("div",{style:{padding:"10px 14px",background:"#f0fdfa",
+            borderTop:"2px solid #99f6e4"}},
+            React.createElement("div",{style:{fontWeight:800,color:"#0f766e",fontSize:"0.82rem",marginBottom:6}},
+              "📊 Récapitulatif final — "+s.canevas.classe+" · "+s.canevas.compNum),
+            React.createElement("div",{style:{display:"flex",gap:16,flexWrap:"wrap",fontSize:"0.83rem",fontWeight:700}},
+              React.createElement("span",{style:{color:"#0f766e"}},"Effectif : "+s.total),
+              React.createElement("span",{style:{color:"#166534"}},"Admis : "+s.admis),
+              React.createElement("span",{style:{color:"#dc2626"}},"Échecs : "+s.echec),
+              React.createElement("span",{style:{color:"#d97706"}},"Taux : "+s.taux.toFixed(1)+"%"),
+              React.createElement("span",{style:{color:"#7c3aed"}},"Moy. classe : "+s.moyClasse.toFixed(2)+"/"+base),
+              React.createElement("span",{style:{color:"#2563eb"}},"Garçons : "+s.resultats.filter(r=>r.sexe==="M").length),
+              React.createElement("span",{style:{color:"#db2777"}},"Filles : "+s.resultats.filter(r=>r.sexe==="F").length)
             )
           )
-        )
-      )),
-      synthese.length>1&&React.createElement(Card,{style:{padding:0,overflow:"hidden"}},
-        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",color:"white",fontWeight:900}},
+        );
+      }),
+
+      // Tableau récap global (Examens multi-écoles)
+      isEx&&synthese.length>1&&React.createElement(Card,{style:{padding:0,overflow:"hidden"}},
+        React.createElement("div",{style:{padding:"10px 14px",background:"linear-gradient(90deg,#166534,#15803d)",
+          color:"white",fontWeight:900}},
           "🏛️ Tableau Récapitulatif — "+(cfg.inspection||"Inspection IEPP")),
         React.createElement("div",{style:{overflowX:"auto"}},
           React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:"0.8rem"}},
             React.createElement("thead",null,
               React.createElement("tr",{style:{background:"#f0fdf4"}},
-                ...["École","Classe","Compos.","Effectif","Admis","Échec","Taux %","Moy/20","Mention"].map(h=>
-                  React.createElement("th",{key:h,style:{padding:"8px 10px",borderBottom:"2px solid #d1fae5",fontWeight:800,color:"#166534",textAlign:h==="École"?"left":"center"}},h)
+                ...["École","Classe","Compos.","Effectif","Admis","Échec","Taux %","Moy/Base","Mention"].map(h=>
+                  React.createElement("th",{key:h,style:{padding:"8px 10px",borderBottom:"2px solid #d1fae5",
+                    fontWeight:800,color:"#166534",textAlign:h==="École"?"left":"center"}},h)
                 )
               )
             ),
             React.createElement("tbody",null,
               ...synthese.map((s,i)=>{
-                const mt=getMention(s.moyClasse);
+                const mt=getMention(s.moyClasse,s.canevas?.classe);
+                const base=s.base||20;
                 return React.createElement("tr",{key:i,style:{borderBottom:"1px solid #f0fdf4",background:i%2===0?"white":"#fafafa"}},
                   React.createElement("td",{style:{padding:"7px 10px",fontWeight:700}},s.ecoleName),
                   React.createElement("td",{style:{padding:"7px 8px",textAlign:"center"}},React.createElement(Badge,{color:"#1d4ed8"},s.canevas.classe)),
@@ -1616,9 +1913,12 @@ const PageSynthese=({session,toast})=>{
                   React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",fontWeight:700}},s.total),
                   React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",color:"#166534",fontWeight:800}},s.admis),
                   React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",color:"#dc2626",fontWeight:700}},s.echec),
-                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",fontWeight:800,color:s.taux>=50?"#166534":"#dc2626"}},s.taux.toFixed(1)+"%"),
-                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",fontWeight:900,color:mt.color}},s.moyClasse.toFixed(2)+"/20"),
-                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center"}},React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label))
+                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",fontWeight:800,
+                    color:s.taux>=50?"#166534":"#dc2626"}},s.taux.toFixed(1)+"%"),
+                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center",fontWeight:900,color:mt.color}},
+                    s.moyClasse.toFixed(2)+"/"+base),
+                  React.createElement("td",{style:{padding:"7px 8px",textAlign:"center"}},
+                    React.createElement(Badge,{color:mt.color,bg:mt.bg},mt.label))
                 );
               }),
               React.createElement("tr",{style:{background:"#f0fdf4",borderTop:"2px solid #86efac",fontWeight:900}},
@@ -1626,9 +1926,14 @@ const PageSynthese=({session,toast})=>{
                 React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#0f766e"}},global.total),
                 React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#166534"}},global.admis),
                 React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#dc2626"}},global.echec),
-                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:global.admis/global.total>=0.5?"#166534":"#dc2626"}},(global.admis/global.total*100).toFixed(1)+"%"),
-                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#0f766e",fontWeight:900}},global.moy.toFixed(2)+"/20"),
-                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center"}},React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},getMention(global.moy).label))
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",
+                  color:global.admis/global.total>=0.5?"#166534":"#dc2626"}},
+                  (global.admis/global.total*100).toFixed(1)+"%"),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center",color:"#0f766e",fontWeight:900}},
+                  global.moy.toFixed(2)+"/20"),
+                React.createElement("td",{style:{padding:"9px 8px",textAlign:"center"}},
+                  React.createElement(Badge,{color:getMention(global.moy).color,bg:getMention(global.moy).bg},
+                    getMention(global.moy).label))
               )
             )
           )
